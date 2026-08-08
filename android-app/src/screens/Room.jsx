@@ -37,8 +37,14 @@ export default function Room({ party }) {
   const members = room.members.filter((m) => m.approved)
   const waitingNames = room.waiting.map((id) => room.members.find((m) => m.id === id)?.name).filter(Boolean)
 
-  // Chat is a column of its own on a tablet, and a sheet over the film on a phone.
-  const docked = layout.split && !full
+  /**
+   * Where the chat goes, decided once:
+   *   side   — tablet, beside the film
+   *   below  — phone held upright, under the film, filling the rest of the screen
+   *   sheet  — phone on its side, where there is no room for anything but the film
+   */
+  const chatMode = full ? 'none' : layout.split ? 'side' : layout.short ? 'sheet' : 'below'
+  const docked = chatMode === 'side'
 
   /* ------------------------------------------------------------ playback */
 
@@ -95,17 +101,17 @@ export default function Room({ party }) {
   useEffect(() => {
     party.onChatMessage((msg) => {
       if (msg.from === youId || msg.kind !== 'user') return
-      const hidden = full || (!docked && !chatOpen)
+      const hidden = full || (chatMode === 'sheet' && !chatOpen)
       if (!hidden) return
       if (!full) return setUnread((n) => n + 1)
       setCards((c) => [...c, msg].slice(-2)) // a phone has room for two, not three
       armCard(msg.id)
     })
-  }, [party, full, chatOpen, docked, youId]) // eslint-disable-line
+  }, [party, full, chatOpen, chatMode, youId]) // eslint-disable-line
 
   useEffect(() => {
-    if (docked || chatOpen) setUnread(0)
-  }, [chat, docked, chatOpen])
+    if (chatMode !== 'sheet' || chatOpen) setUnread(0)
+  }, [chat, chatMode, chatOpen])
 
   useEffect(() => {
     if (full) return
@@ -279,14 +285,23 @@ export default function Room({ party }) {
             room={room} isHost={isHost} send={send} duration={duration}
             sources={sources} active={activeSrc} quality={quality} setQuality={setQuality} player={player}
             onFull={enterFull}
-            onChat={docked ? null : () => setChatOpen(true)}
+            onChat={chatMode === 'sheet' ? () => setChatOpen(true) : null}
             unread={unread}
             compact={layout.short}
           />
         )}
 
-        {/* Chat over the film on phones. Docked tablets skip this entirely. */}
-        {!docked && !full && (
+        {/* Upright phone: the chat is part of the layout, not floating over it. */}
+        {chatMode === 'below' && (
+          <div className="flex-1 min-h-0">
+            <ChatPanel
+              chat={chat} pending={pending} isHost={isHost} send={send} youId={youId}
+              keyboard={kb} hasSource={sources.length > 0} flush
+            />
+          </div>
+        )}
+
+        {chatMode === 'sheet' && (
           <div
             className={`absolute inset-0 z-50 transition-transform duration-300 ${
               chatOpen ? 'translate-y-0' : 'translate-y-full pointer-events-none'
@@ -556,7 +571,7 @@ function ReadyCheck({ room, you, members, send }) {
             {notReady.length ? `Waiting for ${notReady.map((m) => m.name).join(', ')}` : 'Starting…'}
           </p>
         ) : (
-          <Button kind="primary" className="w-full flex flex-row gap-2" onClick={() => send({ type: 'ready' })}>
+          <Button kind="primary" className="w-full" onClick={() => send({ type: 'ready' })}>
             <Check size={17} strokeWidth={3} />
             Ready
           </Button>
@@ -566,14 +581,14 @@ function ReadyCheck({ room, you, members, send }) {
   )
 }
 
-function ChatPanel({ chat, pending, isHost, send, youId, onClose, keyboard = 0, sheet, hasSource }) {
+function ChatPanel({ chat, pending, isHost, send, youId, onClose, keyboard = 0, sheet, flush, hasSource }) {
   const [text, setText] = useState('')
   const [url, setUrl] = useState('')
   const list = useRef(null)
   useEffect(() => { list.current?.scrollTo({ top: 1e9, behavior: 'smooth' }) }, [chat])
 
   return (
-    <div className={`h-full w-full flex flex-col min-h-0 ${sheet ? 'glass-solid' : 'p-2 pl-0'}`}>
+    <div className={`h-full w-full flex flex-col min-h-0 ${sheet ? 'glass-solid' : flush ? 'px-2 pb-1' : 'p-2 pl-0'}`}>
       <div className={`flex-1 flex flex-col min-h-0 ${sheet ? '' : 'glass rounded-2xl overflow-hidden'}`}>
         <div className="flex items-center justify-between px-4 py-2 shrink-0"
              style={sheet ? { paddingTop: 'calc(var(--top) + 0.5rem)' } : undefined}>
@@ -763,17 +778,17 @@ function MemberSheet({ target, isOwner, onClose, send }) {
       <div className="space-y-2">
         {isOwner && (
           <>
-            <Button kind="ghost" className="w-full flex flex-row gap-2 justify-start px-4 text-yellow-300"
+            <Button kind="ghost" className="w-full justify-start px-4 text-yellow-300"
                     onClick={() => act({ type: 'promote', id: target.id })}>
               <Crown size={16} /> Make host
             </Button>
-            <Button kind="ghost" className="w-full flex flex-row gap-2 justify-start px-4 text-sky-300"
+            <Button kind="ghost" className="w-full justify-start px-4 text-sky-300"
                     onClick={() => act({ type: 'cohost', id: target.id, on: !target.coHost })}>
               <Shield size={16} /> {target.coHost ? 'Remove co-host' : 'Make co-host'}
             </Button>
           </>
         )}
-        <Button kind="ghost" className="w-full flex flex-row gap-2 justify-start px-4 text-red-300"
+        <Button kind="ghost" className="w-full justify-start px-4 text-red-300"
                 onClick={() => act({ type: 'kick', id: target.id })}>
           <UserX size={16} /> Remove from party
         </Button>
@@ -807,7 +822,7 @@ function LeaveSheet({ room, youId, isOwner, onCancel, onLeave, onHandOver }) {
           ))}
         </div>
       ) : (
-        <Button kind="danger" className="w-full flex flex-row gap-2" onClick={onLeave}>
+        <Button kind="danger" className="w-full" onClick={onLeave}>
           <LogOut size={17} /> Leave
         </Button>
       )}

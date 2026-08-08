@@ -87,7 +87,7 @@ export default function Lobby({ party }) {
               />
               <Button
                 kind="primary"
-                className="flex-1 flex-row gap-2 flex"
+                className="flex-1"
                 disabled={!ready || code.length !== 3}
                 onClick={() => { save(); party.join(code, name.trim(), avatar) }}
               >
@@ -123,7 +123,7 @@ export default function Lobby({ party }) {
             </div>
             <Button
               kind="primary"
-              className="w-full flex flex-row gap-2"
+              className="w-full"
               disabled={!ready}
               onClick={() => { save(); party.create(name.trim(), avatar, cap) }}
             >

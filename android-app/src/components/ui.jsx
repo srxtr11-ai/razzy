@@ -125,9 +125,12 @@ export function Button({ kind = 'ghost', className = '', style, ...p }) {
     plain: 'text-white/70',
     danger: 'bg-red-500 text-white font-semibold',
   }
+  // inline-flex, not grid: a grid centres icon and label into separate rows, so
+  // every button with an icon stacked into two lines.
   return (
     <button
-      className={`press rounded-2xl px-4 grid place-items-center disabled:opacity-40 ${kinds[kind]} ${className}`}
+      className={`press rounded-2xl px-4 inline-flex items-center justify-center gap-2 whitespace-nowrap
+        disabled:opacity-40 ${kinds[kind]} ${className}`}
       style={{ minHeight: 'var(--tap)', ...style }}
       {...p}
     />

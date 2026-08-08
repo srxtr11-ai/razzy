@@ -77,6 +77,17 @@ node guest.js ABC Sara 8080   # joins party ABC and chats every few seconds
 | Refresh | The party code is remembered, so reloading walks straight back in under the same identity instead of dropping you at the lobby. |
 | Look | Liquid glass: deep blur, multi-layer inset shadows, an aqua `::before` reflection and a pointer-tracked glare, over dark green ambient light. Chat and controls are docked panels, not floating overlays. |
 
+## Android app
+
+`android-app/` builds a real APK that talks to this server. It shares `lib.js`
+and the player abstraction with the web client but has its own interface, with
+separate layouts for a phone upright, a phone on its side, and a tablet. See
+[`android-app/README.md`](android-app/README.md).
+
+```bash
+cd android-app && npm install && npm run apk
+```
+
 ## Brand assets
 
 `web/public/` is generated, not hand-edited. Rebuild it from the source artwork:
