@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { syncAction } from '../../lib.js'
 import {
   Check, Copy, Crown, Loader2, LogOut, Maximize2, Minimize2,
-  Pause, Play, Send, SkipForward, UserX, Volume2, X,
+  Pause, Play, Plus, Send, Settings, Shield, SkipForward, UserX, Volume2, X,
 } from 'lucide-react'
 import { Avatar, Button, OwnerBadge, Signal, fmt, glare } from './ui.jsx'
 import { FilePlayer, YouTubePlayer } from './players.jsx'
@@ -22,10 +22,15 @@ export default function Room({ party }) {
   const [unread, setUnread] = useState(0)
   const [urlDraft, setUrlDraft] = useState('')
   const [leaving, setLeaving] = useState(false)
+  const [quality, setQuality] = useState(0) // index into room.sources — a personal choice
   const hideTimer = useRef(null)
   const cardTimers = useRef(new Map())
   const shell = useRef(null)
 
+  // Co-hosts get every day-to-day control; only the owner holds the crown.
+  const isHost = isOwner || !!you?.coHost
+  const sources = room.sources || []
+  const active = sources[Math.min(quality, sources.length - 1)] || null
   const pending = room.members.filter((m) => !m.approved)
   const waitingNames = room.waiting.map((id) => room.members.find((m) => m.id === id)?.name).filter(Boolean)
 
@@ -35,7 +40,7 @@ export default function Room({ party }) {
   // same whether that player is our <video> or YouTube's embedded one.
   useEffect(() => {
     const p = video.current
-    if (!p || !room.source) return
+    if (!p || !active) return
     if (room.phase !== 'playing' || room.paused) {
       if (!p.isPaused()) p.pause()
       if (Math.abs(p.time() - room.t) > 1.5) p.seek(room.t)
@@ -52,7 +57,7 @@ export default function Room({ party }) {
         .then(() => setBlocked(false))
         .catch(() => p.playMuted().then(() => setBlocked('sound')).catch(() => setBlocked('play')))
     }
-  }, [room.phase, room.paused, room.t, room.source])
+  }, [room.phase, room.paused, room.t, active?.id])
 
   // Report position, buffer health and focus state once a second — and rescue a
   // wedged element. Chrome sometimes suspends a media load and never resumes it:
@@ -167,16 +172,16 @@ export default function Room({ party }) {
           className={`shrink-0 overflow-hidden transition-all duration-500 ${SPRING}
             ${focus ? 'h-0 opacity-0 -translate-y-3' : 'h-16 opacity-100 translate-y-0'}`}
         >
-          <TopBar room={room} youId={youId} isOwner={isOwner} send={send} onLeave={() => setLeaving(true)} />
+          <TopBar room={room} youId={youId} isOwner={isOwner} isHost={isHost} send={send} onLeave={() => setLeaving(true)} />
         </header>
 
         {/* video surface */}
         <div className="relative flex-1 min-h-0 bg-black" onPointerDown={poke}>
-          {room.source ? (
-            room.kind === 'youtube' ? (
-              <YouTubePlayer key={room.source} ref={video} videoId={room.source} onDuration={setDuration} />
+          {active ? (
+            active.kind === 'youtube' ? (
+              <YouTubePlayer key={active.id} ref={video} videoId={active.source} onDuration={setDuration} />
             ) : (
-              <FilePlayer key={room.source} ref={video} src={room.source} onDuration={setDuration} />
+              <FilePlayer key={active.id} ref={video} src={active.source} onDuration={setDuration} />
             )
           ) : (
             <div className="absolute inset-0 grid place-items-center text-white/40 text-sm px-6 text-center">
@@ -284,8 +289,9 @@ export default function Room({ party }) {
             ${focus ? 'max-h-0 opacity-0 translate-y-4' : 'max-h-48 opacity-100 translate-y-0'}`}
         >
           <Controls
-            room={room} you={you} isOwner={isOwner} send={send} duration={duration}
+            room={room} you={you} isHost={isHost} send={send} duration={duration}
             onFocus={enterFullScreen} unread={unread}
+            sources={sources} active={active} quality={quality} setQuality={setQuality} player={video}
           />
         </div>
       </main>
@@ -309,7 +315,8 @@ export default function Room({ party }) {
             : 'h-[42%] lg:h-auto lg:w-[22rem] xl:w-[24rem] opacity-100'}`}
       >
         <ChatPanel
-          chat={chat} pending={pending} isOwner={isOwner} send={send} youId={youId}
+          chat={chat} pending={pending} isOwner={isOwner} isHost={isHost} send={send} youId={youId}
+          hasSource={sources.length > 0}
           urlDraft={urlDraft} setUrlDraft={setUrlDraft}
         />
       </aside>
@@ -433,7 +440,7 @@ function CodeChip({ code }) {
   )
 }
 
-function TopBar({ room, youId, isOwner, send, onLeave }) {
+function TopBar({ room, youId, isOwner, isHost, send, onLeave }) {
   const [menu, setMenu] = useState(null) // member id whose actions are open
   const target = room.members.find((m) => m.id === menu)
 
@@ -447,13 +454,27 @@ function TopBar({ room, youId, isOwner, send, onLeave }) {
             <div className="liquid rounded-2xl p-2 flex items-center gap-2 card-in">
               <Avatar m={target} size={28} />
               <span className="text-sm px-1 max-w-32 truncate">{target.name}</span>
-              <button
-                className="press flex items-center gap-1.5 rounded-xl px-3 h-9 text-sm font-semibold bg-yellow-400/15 text-yellow-300 hover:bg-yellow-400/25"
-                onClick={() => { send({ type: 'promote', id: target.id }); setMenu(null) }}
-              >
-                <Crown size={14} />
-                Make host
-              </button>
+              {isOwner && (
+                <>
+                  <button
+                    className="press flex items-center gap-1.5 rounded-xl px-3 h-9 text-sm font-semibold bg-yellow-400/15 text-yellow-300 hover:bg-yellow-400/25"
+                    onClick={() => { send({ type: 'promote', id: target.id }); setMenu(null) }}
+                  >
+                    <Crown size={14} />
+                    Make host
+                  </button>
+                  <button
+                    className={`press flex items-center gap-1.5 rounded-xl px-3 h-9 text-sm font-semibold
+                      ${target.coHost
+                        ? 'bg-sky-400/20 text-sky-300 hover:bg-sky-400/30'
+                        : 'bg-white/8 text-white/70 hover:bg-white/15'}`}
+                    onClick={() => { send({ type: 'cohost', id: target.id, on: !target.coHost }); setMenu(null) }}
+                  >
+                    <Shield size={14} />
+                    {target.coHost ? 'Remove co-host' : 'Make co-host'}
+                  </button>
+                </>
+              )}
               <button
                 className="press flex items-center gap-1.5 rounded-xl px-3 h-9 text-sm font-semibold bg-red-500/15 text-red-300 hover:bg-red-500/25"
                 onClick={() => { send({ type: 'kick', id: target.id }); setMenu(null) }}
@@ -478,10 +499,15 @@ function TopBar({ room, youId, isOwner, send, onLeave }) {
               key={m.id}
               className="relative shrink-0 pt-1 pl-1 press"
               title={m.name}
-              onClick={() => isOwner && m.id !== youId && setMenu(menu === m.id ? null : m.id)}
+              onClick={() => isHost && m.id !== youId && setMenu(menu === m.id ? null : m.id)}
             >
               <Avatar m={m} size={32} dim={!m.online} />
               {m.id === room.ownerId && <OwnerBadge size={32} />}
+              {m.coHost && m.id !== room.ownerId && (
+                <span className="absolute top-0 left-0 grid place-items-center rounded-full bg-sky-400 text-black shadow-[0_1px_5px_rgba(0,0,0,.7)] w-[19px] h-[19px]" title="Co-host">
+                  <Shield size={11} strokeWidth={2.75} fill="currentColor" />
+                </span>
+              )}
               <span className="absolute -bottom-1 -right-1"><Signal ping={m.ping} online={m.online} /></span>
               {m.buffering && <span className="absolute inset-0 top-1 left-1 rounded-full ring-2 ring-yellow-400 animate-pulse" />}
               {m.focus && <span className="absolute top-1 -right-0.5 w-2 h-2 rounded-full bg-grass ring-2 ring-black/60" title="In focus mode" />}
@@ -506,7 +532,103 @@ function TopBar({ room, youId, isOwner, send, onLeave }) {
   )
 }
 
-function Controls({ room, you, isOwner, send, duration, onFocus, unread }) {
+/**
+ * Quality is a personal choice — it's about your bandwidth, not the room's, so
+ * switching never touches anyone else. Two things can appear here:
+ *   · renditions the host added (a 1080p alongside the 720p), and
+ *   · YouTube's own levels, when YouTube is what's playing.
+ */
+function QualityMenu({ sources, active, quality, setQuality, player, isHost, send, roomTime }) {
+  const [open, setOpen] = useState(false)
+  const [levels, setLevels] = useState([])
+  const [ytLevel, setYtLevel] = useState('default')
+
+  const isYouTube = active?.kind === 'youtube'
+  useEffect(() => {
+    if (!isYouTube || !open) return
+    setLevels(player.current?.qualities?.() || [])
+  }, [isYouTube, open, player])
+
+  if (!sources.length) return null
+
+  const pick = (i) => {
+    // keep the viewer where they were; the room clock is the truth anyway
+    const at = Math.max(roomTime, player.current?.time?.() ?? 0)
+    setQuality(i)
+    setOpen(false)
+    setTimeout(() => player.current?.seek?.(at), 600)
+  }
+
+  return (
+    <div className="relative shrink-0">
+      <Button kind="ghost" onClick={() => setOpen(!open)} className="flex items-center gap-2 px-3">
+        <Settings size={15} />
+        <span className="hidden md:inline text-xs">{isYouTube && ytLevel !== 'default' ? ytLevel : active?.label}</span>
+      </Button>
+
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div className="absolute bottom-full right-0 mb-3 z-50 liquid rounded-2xl p-2 w-56 card-in space-y-1">
+            <div className="px-2 pt-1 pb-0.5 text-[11px] uppercase tracking-[0.2em] text-white/35">Quality</div>
+
+            {sources.map((s, i) => (
+              <div key={s.id} className="flex items-center gap-1">
+                <button
+                  onClick={() => pick(i)}
+                  className={`press flex-1 flex items-center gap-2 rounded-xl px-3 h-9 text-sm text-left
+                    ${i === quality ? 'bg-grass/20 text-grass' : 'hover:bg-white/10'}`}
+                >
+                  {i === quality ? <Check size={14} strokeWidth={3} /> : <span className="w-3.5" />}
+                  <span className="truncate">{s.label}</span>
+                </button>
+                {isHost && sources.length > 1 && (
+                  <button
+                    onClick={() => send({ type: 'removeQuality', id: s.id })}
+                    className="press w-8 h-8 grid place-items-center rounded-lg text-white/35 hover:text-red-300 hover:bg-red-500/15"
+                    aria-label={`Remove ${s.label}`}
+                  >
+                    <X size={13} />
+                  </button>
+                )}
+              </div>
+            ))}
+
+            {/* YouTube exposes its own ladder; ours is a list of separate links */}
+            {isYouTube && levels.length > 0 && (
+              <>
+                <div className="h-px bg-white/10 my-1" />
+                <div className="px-2 pb-0.5 text-[11px] uppercase tracking-[0.2em] text-white/35">YouTube</div>
+                {['default', ...levels].map((lv) => (
+                  <button
+                    key={lv}
+                    onClick={() => { player.current?.setQuality?.(lv); setYtLevel(lv); setOpen(false) }}
+                    className={`press w-full flex items-center gap-2 rounded-xl px-3 h-9 text-sm text-left
+                      ${lv === ytLevel ? 'bg-grass/20 text-grass' : 'hover:bg-white/10'}`}
+                  >
+                    {lv === ytLevel ? <Check size={14} strokeWidth={3} /> : <span className="w-3.5" />}
+                    {lv === 'default' ? 'Auto' : lv}
+                  </button>
+                ))}
+                <p className="px-3 py-1 text-[11px] leading-snug text-white/30">
+                  YouTube treats this as a hint and may override it.
+                </p>
+              </>
+            )}
+
+            {isHost && (
+              <p className="px-3 py-1 text-[11px] leading-snug text-white/30">
+                Paste another link under the chat to add a version.
+              </p>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+function Controls({ room, you, isHost, send, duration, onFocus, unread, sources, active, quality, setQuality, player }) {
   const typing = room.members.filter((m) => m.typing && m.id !== you?.id).map((m) => m.name)
   const pct = duration ? (Math.min(room.t, duration) / duration) * 100 : 0
 
@@ -514,8 +636,8 @@ function Controls({ room, you, isOwner, send, duration, onFocus, unread }) {
     <div className="p-3">
       <div className="liquid glare rounded-full h-14 px-3 flex items-center gap-3" onPointerMove={glare.onPointerMove}>
         {room.phase === 'idle' ? (
-          isOwner ? (
-            <Button kind="primary" disabled={!room.source} onClick={() => send({ type: 'start' })}>Start</Button>
+          isHost ? (
+            <Button kind="primary" disabled={!sources.length} onClick={() => send({ type: 'start' })}>Start</Button>
           ) : (
             <span className="text-sm text-white/50 px-3">Waiting for host</span>
           )
@@ -555,6 +677,11 @@ function Controls({ room, you, isOwner, send, duration, onFocus, unread }) {
           {typing.length ? `${typing.join(', ')} typing…` : ''}
         </span>
 
+        <QualityMenu
+          sources={sources} active={active} quality={quality} setQuality={setQuality}
+          player={player} isHost={isHost} send={send} roomTime={room.t}
+        />
+
         <Button kind="ghost" onClick={onFocus} className="relative shrink-0 flex items-center gap-2">
           <Maximize2 size={15} />
           <span className="hidden sm:inline">Full screen</span>
@@ -570,7 +697,7 @@ function Controls({ room, you, isOwner, send, duration, onFocus, unread }) {
 }
 
 /** Docked panel — part of the layout, not floating over the film. */
-function ChatPanel({ chat, pending, isOwner, send, youId, urlDraft, setUrlDraft }) {
+function ChatPanel({ chat, pending, isOwner, isHost, send, youId, urlDraft, setUrlDraft, hasSource }) {
   const [text, setText] = useState('')
   const list = useRef(null)
   useEffect(() => { list.current?.scrollTo({ top: 1e9, behavior: 'smooth' }) }, [chat])
@@ -591,7 +718,7 @@ function ChatPanel({ chat, pending, isOwner, send, youId, urlDraft, setUrlDraft 
         </div>
 
         <div ref={list} className="flex-1 overflow-y-auto no-scrollbar px-3 space-y-2 pb-2 min-h-0">
-          {isOwner &&
+          {isHost &&
             pending.map((p) => (
               <div key={p.id} className="liquid-lite rounded-2xl p-3 flex items-center gap-3 card-in">
                 <Avatar m={p} size={34} />
@@ -647,7 +774,7 @@ function ChatPanel({ chat, pending, isOwner, send, youId, urlDraft, setUrlDraft 
 
         {/* Host's source box, parked under the chat: loading a link is a setup
             step, not a playback control, so it doesn't belong on the player bar. */}
-        {isOwner && (
+        {isHost && (
           <form
             className="px-2 pb-2 pt-0 flex gap-2 shrink-0"
             onSubmit={(e) => {
@@ -664,6 +791,21 @@ function ChatPanel({ chat, pending, isOwner, send, youId, urlDraft, setUrlDraft 
             <Button kind="ghost" type="submit" className="h-10 px-4 shrink-0 bg-white/6">
               Load
             </Button>
+            {/* Same film, different rendition — appends a quality option rather
+                than replacing what everyone is watching. */}
+            {hasSource && (
+              <Button
+                kind="ghost"
+                type="button"
+                className="h-10 px-3 shrink-0 bg-white/6"
+                title="Add this link as another quality option"
+                onClick={() => {
+                  if (urlDraft.trim()) { send({ type: 'addQuality', url: urlDraft.trim() }); setUrlDraft('') }
+                }}
+              >
+                <Plus size={15} />
+              </Button>
+            )}
           </form>
         )}
       </div>

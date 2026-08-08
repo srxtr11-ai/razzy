@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { newCode, parsePixeldrain, parseYouTube, resolveSource, laggards, syncAction, nextOwner, ALPHABET } from './lib.js'
+import { newCode, parsePixeldrain, parseYouTube, qualityLabel, resolveSource, laggards, syncAction, nextOwner, ALPHABET } from './lib.js'
 
 // codes
 const c = newCode()
@@ -39,6 +39,16 @@ const yt = resolveSource('https://youtu.be/dQw4w9WgXcQ')
 assert.equal(yt.kind, 'youtube')
 assert.equal(yt.source, 'dQw4w9WgXcQ', 'youtube carries the id, not a byte URL')
 assert.equal(resolveSource('https://example.com/page.html'), null, 'arbitrary pages still refused')
+
+// quality labels come from the file name, since nobody wants to type them
+assert.equal(qualityLabel('11eyes 003 720p.mp4'), '720p')
+assert.equal(qualityLabel('Movie.2019.1080p.BluRay.mkv'), '1080p')
+assert.equal(qualityLabel('https://cdn.example.com/clip-480p.mp4'), '480p')
+assert.equal(qualityLabel('Show.S01E02.2160p.mp4'), '2160p')
+assert.equal(qualityLabel('something 4K remux.mp4'), '2160p')
+assert.equal(qualityLabel('holiday.mp4'), 'Source', 'no hint -> fallback')
+assert.equal(qualityLabel('holiday.mp4', 'Option 2'), 'Option 2', 'caller picks the fallback')
+assert.equal(qualityLabel('720pixels of nothing.mp4'), 'Source', 'not a bare resolution token')
 
 // laggards: who holds the room up
 const M = (o) => ({ online: true, approved: true, buffering: false, t: 100, skipped: false, ...o })

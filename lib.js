@@ -55,6 +55,20 @@ export function resolveSource(url) {
   return null
 }
 
+/**
+ * Guess a quality label from a file name or URL — "11eyes 003 720p.mp4" -> "720p".
+ * One mp4 has exactly one quality, so the only way to offer a choice is for the
+ * host to add alternate links; labelling them by hand would be tedious.
+ */
+export function qualityLabel(nameOrUrl, fallback = 'Source') {
+  const s = String(nameOrUrl || '')
+  const p = s.match(/(?:^|[^0-9a-z])(\d{3,4})[pi](?![0-9a-z])/i)
+  if (p) return `${p[1]}p`
+  if (/(^|[^a-z0-9])(4k|2160)(?![a-z0-9])/i.test(s)) return '2160p'
+  if (/(^|[^a-z0-9])(1440)(?![a-z0-9])/i.test(s)) return '1440p'
+  return fallback
+}
+
 // Who is holding the room up: buffering, or more than `tol` seconds behind the room clock.
 // `skipped` members are ignored — the owner has chosen to leave them behind.
 export function laggards(members, roomTime, tol = 5) {

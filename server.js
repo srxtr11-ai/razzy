@@ -7,7 +7,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { Readable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
-import { newCode, resolveSource, laggards, nextOwner } from './lib.js'
+import { newCode, parsePixeldrain, qualityLabel, resolveSource, laggards, nextOwner } from './lib.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const DATA = process.env.DATA_DIR || path.join(HERE, 'data') // Railway volume mounts here
@@ -30,8 +30,7 @@ const dropStmt = db.prepare(`DELETE FROM rooms WHERE code = ?`)
 
 /** Everything except live sockets. Members come back as offline after a redeploy. */
 const snapshot = (r) => ({
-  code: r.code, cap: r.cap, ownerId: r.ownerId, source: r.source, origin: r.origin ?? null,
-  kind: r.kind ?? 'file', proxied: !!r.proxied, phase: r.phase, t: r.t, paused: r.paused,
+  code: r.code, cap: r.cap, ownerId: r.ownerId, sources: r.sources || [], phase: r.phase, t: r.t, paused: r.paused,
   members: [...r.members.values()].map(({ ws, ...m }) => ({ ...m, online: false, ready: false, buffering: false })),
 })
 
@@ -61,12 +60,12 @@ const approved = (r) => [...r.members.values()].filter((m) => m.approved)
 function publicRoom(r) {
   const waiting = laggards([...r.members.values()], r.t).map((m) => m.id)
   return {
-    code: r.code, cap: r.cap, ownerId: r.ownerId, source: r.source, origin: r.origin ?? null,
-    kind: r.kind ?? 'file', proxied: !!r.proxied,
+    code: r.code, cap: r.cap, ownerId: r.ownerId, sources: r.sources || [],
     phase: r.phase, t: r.t, paused: r.paused, pausedBy: r.pausedBy || null, waiting,
     members: [...r.members.values()].map((m) => ({
       id: m.id, name: m.name, avatar: m.avatar, approved: m.approved, online: m.online,
       ready: !!m.ready, buffering: !!m.buffering, paused: !!m.paused, focus: !!m.focus,
+      coHost: !!m.coHost,
       // Typing expires on its own. A client that goes to focus mode, closes the
       // tab or just stops mid-word never sends "stopped", so a sticky flag left
       // people permanently "typing…".
@@ -209,6 +208,18 @@ function maybeStart(r) {
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0 Safari/537.36'
 const probeCache = new Map() // host -> plays directly in a browser?
 
+/** The file's own name, when the host will tell us — it usually carries "720p". */
+async function describeFile(url) {
+  const id = parsePixeldrain(url)
+  if (id) {
+    try {
+      const r = await fetch(`https://pixeldrain.com/api/file/${id}/info`, { headers: { 'User-Agent': UA } })
+      if (r.ok) return (await r.json()).name || ''
+    } catch {}
+  }
+  try { return decodeURIComponent(new URL(url).pathname.split('/').pop() || '') } catch { return '' }
+}
+
 /**
  * PixelDrain (and friends) refuse cross-site playback: the browser always sends
  * `Sec-Fetch-Site: cross-site` and JS cannot remove it, so <video src=pixeldrain>
@@ -262,7 +273,8 @@ app.get('/stream/:b64', async (req, reply) => {
   try { target = Buffer.from(req.params.b64, 'base64url').toString() } catch { return reply.code(400).send() }
   // Only files a live room is actually playing. Checking `origin` alone would
   // also match a YouTube page URL and turn this into a fetch-anything proxy.
-  const servable = [...rooms.values()].some((r) => (r.kind ?? 'file') === 'file' && r.origin === target)
+  const servable = [...rooms.values()].some((r) =>
+    (r.sources || []).some((x) => x.kind === 'file' && x.origin === target))
   if (!servable) return reply.code(403).send({ error: 'not a live source' })
 
   // A <video> abandons range requests constantly (pause, seek, buffer-ahead).
@@ -319,6 +331,9 @@ wss.on('connection', (ws) => {
 
   const fail = (msg) => send(ws, { type: 'error', error: msg })
   const isOwner = () => room && me && room.ownerId === me.id
+  // Co-hosts share every day-to-day control. Only the owner appoints them,
+  // holds the crown, and is the one the room can't run without.
+  const isHost = () => isOwner() || (room && me && !!me.coHost && me.approved)
 
   const attach = (r, member) => {
     room = r
@@ -374,7 +389,7 @@ wss.on('connection', (ws) => {
     if (!room || !me) return fail('not in a party')
 
     /* --- owner ------------------------------------------------------- */
-    if (m.type === 'approve' && isOwner()) {
+    if (m.type === 'approve' && isHost()) {
       const t = room.members.get(m.id)
       if (!t) return
       if (m.ok) {
@@ -388,9 +403,11 @@ wss.on('connection', (ws) => {
       return pushState(room)
     }
 
-    if (m.type === 'kick' && isOwner() && m.id !== room.ownerId) {
+    if (m.type === 'kick' && isHost() && m.id !== room.ownerId) {
       const t = room.members.get(m.id)
       if (!t) return
+      // A co-host can clear out troublemakers but can't turn on their peers.
+      if (t.coHost && !isOwner()) return fail('Only the host can remove a co-host')
       send(t.ws, { type: 'declined' })
       t.ws?.close()
       rmAvatar(t.avatar)
@@ -399,10 +416,22 @@ wss.on('connection', (ws) => {
       return pushState(room)
     }
 
+    // Only the owner appoints co-hosts — otherwise a co-host could recruit more
+    // co-hosts and the owner would lose control of their own party.
+    if (m.type === 'cohost' && isOwner()) {
+      const t = room.members.get(m.id)
+      if (!t || !t.approved) return fail('They need to be in the party')
+      if (t.id === room.ownerId) return fail('You already run this party')
+      t.coHost = !!m.on
+      say(room, t.coHost ? `${t.name} is a co-host now` : `${t.name} is no longer a co-host`)
+      return pushState(room)
+    }
+
     if (m.type === 'promote' && isOwner()) {
       const t = room.members.get(m.id)
       if (!t || !t.approved || !t.online) return fail('They need to be in the party')
       room.ownerId = t.id
+      t.coHost = false // the crown outranks it; no need to hold both
       room.ownerGoneAt = null
       say(room, `${me.name} made ${t.name} the host`)
       return pushState(room)
@@ -426,43 +455,61 @@ wss.on('connection', (ws) => {
       return pushState(r)
     }
 
-    if (m.type === 'skip' && isOwner()) {
+    if (m.type === 'skip' && isHost()) {
       const t = room.members.get(m.id)
       if (t) { t.skipped = true; say(room, `Skipped ${t.name}`) }
       return pushState(room)
     }
 
-    if (m.type === 'source' && isOwner()) {
+    // `add` appends another rendition of the same video (a 1080p next to the
+    // 720p) instead of replacing it, so viewers can pick per their bandwidth.
+    if ((m.type === 'source' || m.type === 'addQuality') && isHost()) {
       const src = resolveSource(m.url)
       if (!src) return fail('Paste a YouTube link, a PixelDrain link, or a direct .mp4')
       const r = room
-      r.origin = src.origin // must be set before /stream will serve it
+      const add = m.type === 'addQuality'
+      if (add && !r.sources?.length) return fail('Load a video first')
 
-      const load = (source, proxied, note) => {
-        r.kind = src.kind
-        r.source = source
-        r.proxied = proxied
-        r.phase = 'idle'
-        r.t = 0
-        r.paused = true
-        for (const x of r.members.values()) { x.ready = false; x.skipped = false; x.t = 0 }
-        say(r, note)
+      const put = (source, proxied, label) => {
+        const entry = { id: randomUUID(), kind: src.kind, source, origin: src.origin, proxied, label }
+        if (add) {
+          r.sources = [...(r.sources || []), entry]
+          say(r, `Added a ${label} option`)
+        } else {
+          r.sources = [entry]
+          r.phase = 'idle'
+          r.t = 0
+          r.paused = true
+          for (const x of r.members.values()) { x.ready = false; x.skipped = false; x.t = 0 }
+          say(r, src.kind === 'youtube'
+            ? 'New video loaded from YouTube'
+            : proxied ? 'New video loaded (streaming through the server)' : 'New video loaded')
+        }
         pushState(r)
       }
 
-      // YouTube plays in its own embedded player, so there's nothing to probe
-      // and no bytes for us to carry.
-      if (src.kind === 'youtube') return load(src.source, false, 'New video loaded from YouTube')
+      // YouTube plays in its own embedded player: nothing to probe, no bytes to
+      // carry, and its own quality levels are offered by the player itself.
+      if (src.kind === 'youtube') return put(src.source, false, 'YouTube')
 
-      chooseSource(src.source)
-        .then(({ play, proxied }) =>
-          load(play, proxied, proxied ? 'New video loaded (streaming through the server)' : 'New video loaded'))
+      describeFile(src.source)
+        .then((name) => qualityLabel(name || src.source, `Option ${(r.sources?.length || 0) + 1}`))
+        .then((label) =>
+          chooseSource(src.source).then(({ play, proxied }) => put(play, proxied, label)))
         .catch(() => fail('Could not reach that file'))
       return
     }
 
-    if (m.type === 'start' && isOwner()) {
-      if (!room.source) return fail('Paste a link first')
+    if (m.type === 'removeQuality' && isHost()) {
+      const list = room.sources || []
+      if (list.length < 2) return fail('That is the only version')
+      room.sources = list.filter((s) => s.id !== m.id)
+      say(room, 'Removed a quality option')
+      return pushState(room)
+    }
+
+    if (m.type === 'start' && isHost()) {
+      if (!room.sources?.length) return fail('Paste a link first')
       room.phase = 'ready'
       for (const x of room.members.values()) x.ready = false
       me.ready = true
@@ -493,7 +540,7 @@ wss.on('connection', (ws) => {
       return pushState(room)
     }
 
-    if (m.type === 'seek' && isOwner()) {
+    if (m.type === 'seek' && isHost()) {
       room.t = Math.max(0, Number(m.t) || 0)
       room.lastTick = Date.now()
       return pushState(room)

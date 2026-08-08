@@ -104,20 +104,22 @@ console.log('· guest approved')
 // 5. only the owner can load a source, and only direct files are accepted
 guest.send({ type: 'source', url: 'https://pixeldrain.com/u/GKBvQx7Y' })
 await new Promise((r) => setTimeout(r, 200))
-assert.equal(host.last('state').room.source, null, 'guest cannot set the source')
+assert.equal(host.last('state').room.sources.length, 0, 'guest cannot set the source')
 
 host.send({ type: 'source', url: 'https://www.youtube.com/watch?v=abc' })
 await host.wait((m) => m.type === 'error')
 host.send({ type: 'source', url: 'https://pixeldrain.com/u/GKBvQx7Y' })
-const withSrc = await guest.wait((m) => m.type === 'state' && m.room.source, 15000)
-assert.equal(withSrc.room.origin, 'https://pixeldrain.com/api/file/GKBvQx7Y', 'pixeldrain link resolved')
+const withSrc = await guest.wait((m) => m.type === 'state' && m.room.sources.length, 15000)
+const only = withSrc.room.sources[0]
+assert.equal(only.origin, 'https://pixeldrain.com/api/file/GKBvQx7Y', 'pixeldrain link resolved')
+assert.equal(only.label, '720p', 'quality label read from the file name')
 // PixelDrain blocks cross-site playback, so the server must have chosen to stream it
-assert.equal(withSrc.room.proxied, true, 'hotlink-blocking host gets proxied')
-assert.match(withSrc.room.source, /^\/stream\//, 'client is pointed at our stream route')
+assert.equal(only.proxied, true, 'hotlink-blocking host gets proxied')
+assert.match(only.source, /^\/stream\//, 'client is pointed at our stream route')
 console.log('· source resolved, hotlink block detected -> proxying')
 
 // the stream route must actually return video bytes, and refuse anything not a live source
-const ranged = await fetch(`http://localhost:${PORT}${withSrc.room.source}`, { headers: { Range: 'bytes=0-999' } })
+const ranged = await fetch(`http://localhost:${PORT}${only.source}`, { headers: { Range: 'bytes=0-999' } })
 assert.equal(ranged.status, 206, 'range request passes through')
 assert.equal(ranged.headers.get('content-type'), 'video/mp4', 'video content type preserved')
 assert.equal((await ranged.arrayBuffer()).byteLength, 1000, 'exactly the requested bytes')
@@ -209,7 +211,7 @@ await solo.ready
 solo.send({ type: 'create', name: 'Solo', cap: 2 })
 await solo.wait((m) => m.type === 'joined')
 solo.send({ type: 'source', url: 'https://pixeldrain.com/u/GKBvQx7Y' })
-await solo.wait((m) => m.type === 'state' && m.room.source, 15000)
+await solo.wait((m) => m.type === 'state' && m.room.sources.length, 15000)
 solo.send({ type: 'start' })
 const soloGo = await solo.wait((m) => m.type === 'state' && m.room.phase === 'playing', 15000)
 assert.equal(soloGo.room.paused, false, 'solo host starts playing on its own')
@@ -224,7 +226,7 @@ assert.equal(guest.last('state').room.members.find((m) => m.id === guestJoined.y
 console.log('· typing indicator expires instead of sticking')
 
 // 16. abandoned stream requests must not take the server down or leak upstream
-const src = `http://localhost:${PORT}${withSrc.room.source}`
+const src = `http://localhost:${PORT}${only.source}`
 for (let i = 0; i < 5; i++) {
   const ac = new AbortController()
   const res = await fetch(src, { signal: ac.signal })
@@ -296,11 +298,11 @@ await ytc.ready
 ytc.send({ type: 'create', name: 'YT', cap: 2 })
 await ytc.wait((m) => m.type === 'joined')
 ytc.send({ type: 'source', url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=30s' })
-const ytState = await ytc.wait((m) => m.type === 'state' && m.room.source, 10000)
-assert.equal(ytState.room.kind, 'youtube', 'recognised as a youtube source')
-assert.equal(ytState.room.source, 'dQw4w9WgXcQ', 'the client gets the video id, not a byte URL')
-assert.equal(ytState.room.proxied, false, 'youtube bytes never touch this server')
-assert.ok(!ytState.room.source.startsWith('/stream/'), 'not routed through the proxy')
+const ytState = await ytc.wait((m) => m.type === 'state' && m.room.sources.length, 10000)
+assert.equal(ytState.room.sources[0].kind, 'youtube', 'recognised as a youtube source')
+assert.equal(ytState.room.sources[0].source, 'dQw4w9WgXcQ', 'the client gets the video id, not a byte URL')
+assert.equal(ytState.room.sources[0].proxied, false, 'youtube bytes never touch this server')
+assert.ok(!ytState.room.sources[0].source.startsWith('/stream/'), 'not routed through the proxy')
 
 // and the proxy refuses to fetch it even if someone asks directly
 const ytProxy = await fetch(
@@ -310,9 +312,73 @@ console.log('· youtube accepted, embedded not proxied')
 
 // 22. a file source in the same server still proxies — the two paths coexist
 ytc.send({ type: 'source', url: 'https://pixeldrain.com/u/GKBvQx7Y' })
-const backToFile = await ytc.wait((m) => m.type === 'state' && m.room.kind === 'file', 15000, true)
-assert.equal(backToFile.room.proxied, true, 'switching back to a file still proxies')
+const backToFile = await ytc.wait((m) => m.type === 'state' && m.room.sources[0]?.kind === 'file', 15000, true)
+assert.equal(backToFile.room.sources[0].proxied, true, 'switching back to a file still proxies')
 console.log('· switching between youtube and file sources works')
+
+// 23. quality options: added, labelled, chosen per viewer, removed
+const qa = client('qa')
+const qb = client('qb')
+await Promise.all([qa.ready, qb.ready])
+qa.send({ type: 'create', name: 'QHost', cap: 3 })
+const qaj = await qa.wait((m) => m.type === 'joined')
+qb.send({ type: 'join', code: qaj.room.code, name: 'QGuest' })
+const qbj = await qb.wait((m) => m.type === 'joined')
+const qreq = await qa.wait((m) => m.type === 'joinreq')
+qa.send({ type: 'approve', id: qreq.id, ok: true })
+await qb.wait((m) => m.type === 'state' && m.room.members.find((x) => x.id === qbj.you)?.approved)
+
+qa.send({ type: 'addQuality', url: 'https://pixeldrain.com/u/GKBvQx7Y' })
+await qa.wait((m) => m.type === 'error') // nothing loaded yet
+qa.send({ type: 'source', url: 'https://pixeldrain.com/u/GKBvQx7Y' })
+await qa.wait((m) => m.type === 'state' && m.room.sources.length === 1, 15000)
+qa.send({ type: 'addQuality', url: 'https://cdn.example.com/movie-1080p.mp4' })
+const two = await qa.wait((m) => m.type === 'state' && m.room.sources.length === 2, 15000, true)
+assert.deepEqual(two.room.sources.map((s) => s.label), ['720p', '1080p'], 'both labelled from their names')
+assert.equal(two.room.phase, 'idle', 'adding a version does not restart the film')
+console.log('· quality options added and labelled')
+
+// a guest can't add or remove versions
+qb.send({ type: 'addQuality', url: 'https://cdn.example.com/movie-480p.mp4' })
+await new Promise((r) => setTimeout(r, 600))
+assert.equal(qb.last('state').room.sources.length, 2, 'guests cannot add versions')
+
+qa.send({ type: 'removeQuality', id: two.room.sources[1].id })
+const one = await qa.wait((m) => m.type === 'state' && m.room.sources.length === 1, 8000, true)
+assert.equal(one.room.sources[0].label, '720p', 'the right one was removed')
+qa.send({ type: 'removeQuality', id: one.room.sources[0].id })
+const lastOne = await qa.wait((m) => m.type === 'error', 8000, true)
+assert.match(lastOne.error, /only version/i, 'the last version cannot be removed')
+console.log('· quality options are host-only and never emptied')
+
+// 24. co-hosts share the controls but not the crown
+qa.send({ type: 'cohost', id: qbj.you, on: true })
+const promotedCo = await qb.wait(
+  (m) => m.type === 'state' && m.room.members.find((x) => x.id === qbj.you)?.coHost, 8000, true)
+assert.equal(promotedCo.room.ownerId, qaj.you, 'a co-host is not the owner')
+
+qb.send({ type: 'source', url: 'https://youtu.be/dQw4w9WgXcQ' })
+const coLoaded = await qb.wait((m) => m.type === 'state' && m.room.sources[0]?.kind === 'youtube', 10000, true)
+assert.ok(coLoaded, 'co-host can load a video')
+qb.send({ type: 'start' })
+await qb.wait((m) => m.type === 'state' && m.room.phase === 'ready', 8000, true)
+console.log('· co-host can load and start')
+
+// but cannot appoint further co-hosts, or take the crown
+qb.send({ type: 'cohost', id: qbj.you, on: true })
+qb.send({ type: 'promote', id: qbj.you })
+await new Promise((r) => setTimeout(r, 700))
+assert.equal(qb.last('state').room.ownerId, qaj.you, 'a co-host cannot crown themselves')
+console.log('· co-host cannot seize the party')
+
+// and the owner can take it back
+qa.send({ type: 'cohost', id: qbj.you, on: false })
+const demoted = await qa.wait(
+  (m) => m.type === 'state' && !m.room.members.find((x) => x.id === qbj.you)?.coHost, 8000, true)
+assert.ok(demoted, 'owner can demote a co-host')
+qb.send({ type: 'skip', id: qaj.you })
+await new Promise((r) => setTimeout(r, 500))
+console.log('· owner can take co-host back')
 
 console.log('\nok — end to end passed')
 done(0)

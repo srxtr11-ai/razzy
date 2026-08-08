@@ -152,6 +152,12 @@ export const YouTubePlayer = forwardRef(function YouTubePlayer({ videoId, onDura
     },
     isPaused: () => state.current !== YT_STATE.PLAYING && state.current !== YT_STATE.BUFFERING,
     rate: (r) => { try { yt.current?.setPlaybackRate(r) } catch {} },
+    qualities: () => {
+      try { return yt.current?.getAvailableQualityLevels?.() ?? [] } catch { return [] }
+    },
+    // YouTube deprecated this: it accepts the call and then decides for itself
+    // based on bandwidth. Offered as a hint, labelled as one in the UI.
+    setQuality: (q) => { try { yt.current?.setPlaybackQuality?.(q) } catch {} },
     reload: () => { const p = yt.current; if (p) { p.seekTo(p.getCurrentTime(), true); p.playVideo() } },
   }), [])
 
