@@ -25,11 +25,33 @@ export function pixeldrainFile(id) {
   return `https://pixeldrain.com/api/file/${id}`
 }
 
-// Direct media links are allowed through untouched.
+// watch?v=, youtu.be/, /shorts/, /embed/, /live/ — all carry the same 11-char id.
+export function parseYouTube(url) {
+  const s = String(url || '').trim()
+  const m = s.match(
+    /(?:youtube\.com\/(?:watch\?(?:[^#]*&)?v=|embed\/|shorts\/|live\/|v\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/
+  )
+  return m ? m[1] : null
+}
+
+/**
+ * What kind of thing did the owner paste?
+ *
+ *  kind 'file'    — we fetch the bytes ourselves and play them in <video>.
+ *  kind 'youtube' — we can't touch the bytes; YouTube's own player is embedded
+ *                   and driven through the IFrame API. Costs us no bandwidth.
+ */
 export function resolveSource(url) {
+  const yt = parseYouTube(url)
+  if (yt) return { kind: 'youtube', source: yt, origin: `https://www.youtube.com/watch?v=${yt}` }
+
   const id = parsePixeldrain(url)
-  if (id) return { url: pixeldrainFile(id), id }
-  if (/^https:\/\/\S+\.(mp4|webm|m4v|mov)(\?\S*)?$/i.test(url)) return { url: url.trim(), id: null }
+  if (id) return { kind: 'file', source: pixeldrainFile(id), origin: pixeldrainFile(id), id }
+
+  if (/^https:\/\/\S+\.(mp4|webm|m4v|mov)(\?\S*)?$/i.test(url)) {
+    const clean = url.trim()
+    return { kind: 'file', source: clean, origin: clean, id: null }
+  }
   return null
 }
 

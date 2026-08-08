@@ -31,7 +31,7 @@ const dropStmt = db.prepare(`DELETE FROM rooms WHERE code = ?`)
 /** Everything except live sockets. Members come back as offline after a redeploy. */
 const snapshot = (r) => ({
   code: r.code, cap: r.cap, ownerId: r.ownerId, source: r.source, origin: r.origin ?? null,
-  proxied: !!r.proxied, phase: r.phase, t: r.t, paused: r.paused,
+  kind: r.kind ?? 'file', proxied: !!r.proxied, phase: r.phase, t: r.t, paused: r.paused,
   members: [...r.members.values()].map(({ ws, ...m }) => ({ ...m, online: false, ready: false, buffering: false })),
 })
 
@@ -62,7 +62,7 @@ function publicRoom(r) {
   const waiting = laggards([...r.members.values()], r.t).map((m) => m.id)
   return {
     code: r.code, cap: r.cap, ownerId: r.ownerId, source: r.source, origin: r.origin ?? null,
-    proxied: !!r.proxied,
+    kind: r.kind ?? 'file', proxied: !!r.proxied,
     phase: r.phase, t: r.t, paused: r.paused, pausedBy: r.pausedBy || null, waiting,
     members: [...r.members.values()].map((m) => ({
       id: m.id, name: m.name, avatar: m.avatar, approved: m.approved, online: m.online,
@@ -260,7 +260,10 @@ app.post('/api/avatar', async (req, reply) => {
 app.get('/stream/:b64', async (req, reply) => {
   let target
   try { target = Buffer.from(req.params.b64, 'base64url').toString() } catch { return reply.code(400).send() }
-  if (![...rooms.values()].some((r) => r.origin === target)) return reply.code(403).send({ error: 'not a live source' })
+  // Only files a live room is actually playing. Checking `origin` alone would
+  // also match a YouTube page URL and turn this into a fetch-anything proxy.
+  const servable = [...rooms.values()].some((r) => (r.kind ?? 'file') === 'file' && r.origin === target)
+  if (!servable) return reply.code(403).send({ error: 'not a live source' })
 
   // A <video> abandons range requests constantly (pause, seek, buffer-ahead).
   // Without this the upstream fetch to the host lives on, leaking a connection
@@ -431,19 +434,30 @@ wss.on('connection', (ws) => {
 
     if (m.type === 'source' && isOwner()) {
       const src = resolveSource(m.url)
-      if (!src) return fail('Direct file links only (PixelDrain, .mp4)')
+      if (!src) return fail('Paste a YouTube link, a PixelDrain link, or a direct .mp4')
       const r = room
-      r.origin = src.url // must be set before /stream will serve it
-      chooseSource(src.url).then(({ play, proxied }) => {
-        r.source = play
+      r.origin = src.origin // must be set before /stream will serve it
+
+      const load = (source, proxied, note) => {
+        r.kind = src.kind
+        r.source = source
         r.proxied = proxied
         r.phase = 'idle'
         r.t = 0
         r.paused = true
         for (const x of r.members.values()) { x.ready = false; x.skipped = false; x.t = 0 }
-        say(r, proxied ? 'New video loaded (streaming through the server)' : 'New video loaded')
+        say(r, note)
         pushState(r)
-      }).catch(() => fail('Could not reach that file'))
+      }
+
+      // YouTube plays in its own embedded player, so there's nothing to probe
+      // and no bytes for us to carry.
+      if (src.kind === 'youtube') return load(src.source, false, 'New video loaded from YouTube')
+
+      chooseSource(src.source)
+        .then(({ play, proxied }) =>
+          load(play, proxied, proxied ? 'New video loaded (streaming through the server)' : 'New video loaded'))
+        .catch(() => fail('Could not reach that file'))
       return
     }
 

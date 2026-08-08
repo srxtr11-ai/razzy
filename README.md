@@ -92,10 +92,27 @@ and *green excess* keys it instead. The header mark gets a hard alpha cut — th
 artwork's soft glow survives a gentle one and reads as a blurry smudge at 24px.
 The accent colour in `index.css` is sampled from the logo so the two match.
 
+## Sources
+
+| Paste | What happens |
+| --- | --- |
+| YouTube (`watch?v=`, `youtu.be`, `/shorts/`, `/embed/`, `/live/`) | YouTube's own player is embedded and driven through the IFrame API. The bytes never touch this server, so it costs nothing to run. |
+| PixelDrain, direct `.mp4`/`.webm` | Played in our own `<video>`, streamed through us when the host blocks hotlinking. |
+
+Both sit behind one small player interface (`web/src/players.jsx`), so the room
+clock, straggler detection, countdown and controls are written once.
+
 ## Limits worth knowing
 
-- **Direct file links only.** PixelDrain and plain `.mp4`/`.webm` URLs. Not
-  YouTube, not Netflix, nothing behind DRM or a JS player.
+- **Not every YouTube video can be embedded.** Uploaders can disable embedding,
+  and age-restricted or region-locked videos will refuse to play.
+- **Ads are per-viewer.** If someone gets a pre-roll they fall behind and the
+  room waits for them, which is correct but can feel abrupt.
+- **Nothing behind DRM.** Netflix, Disney+ and friends are impossible, not
+  merely unimplemented.
+- **Autoplay:** browsers refuse to start audio without a tap. Rather than
+  stalling the whole room for one person, that player falls back to muted
+  playback — they stay in sync and get a "Tap for sound" chip.
 - **Subtitles must be burned in.** Browsers don't render subtitle tracks
   embedded in an mkv/mp4; only external `.vtt` works, which isn't built.
 - **PixelDrain throttles heavily-hotlinked files.** A popular file gets slower

@@ -2,9 +2,10 @@ import { useEffect, useRef, useState } from 'react'
 import { syncAction } from '../../lib.js'
 import {
   Check, Copy, Crown, Loader2, LogOut, Maximize2, Minimize2,
-  Pause, Play, Send, SkipForward, UserX, X,
+  Pause, Play, Send, SkipForward, UserX, Volume2, X,
 } from 'lucide-react'
 import { Avatar, Button, OwnerBadge, Signal, fmt, glare } from './ui.jsx'
+import { FilePlayer, YouTubePlayer } from './players.jsx'
 
 const CARD_MS = 4500
 const SPRING = 'ease-[cubic-bezier(.34,1.2,.64,1)]'
@@ -30,20 +31,27 @@ export default function Room({ party }) {
 
   /* ---------------------------------------------------------- playback */
 
-  // Room state is the truth; the local element is dragged toward it.
+  // Room state is the truth; the local player is dragged toward it. Works the
+  // same whether that player is our <video> or YouTube's embedded one.
   useEffect(() => {
-    const v = video.current
-    if (!v || !room.source) return
+    const p = video.current
+    if (!p || !room.source) return
     if (room.phase !== 'playing' || room.paused) {
-      if (!v.paused) v.pause()
-      if (Math.abs(v.currentTime - room.t) > 1.5) v.currentTime = room.t
+      if (!p.isPaused()) p.pause()
+      if (Math.abs(p.time() - room.t) > 1.5) p.seek(room.t)
       return
     }
-    const { seek, rate } = syncAction(v.currentTime, room.t)
-    if (seek !== null) v.currentTime = seek
-    v.playbackRate = rate
-    // Autoplay is blocked without a user gesture on most browsers; ask for one.
-    if (v.paused) v.play().then(() => setBlocked(false)).catch(() => setBlocked(true))
+    const { seek, rate } = syncAction(p.time(), room.t)
+    if (seek !== null) p.seek(seek)
+    p.rate(rate)
+    // Autoplay needs a user gesture on most browsers. Rather than stopping the
+    // whole room for one person, fall back to playing muted — they stay in sync
+    // and just tap for sound. Only a total refusal counts as blocked.
+    if (p.isPaused()) {
+      p.play()
+        .then(() => setBlocked(false))
+        .catch(() => p.playMuted().then(() => setBlocked('sound')).catch(() => setBlocked('play')))
+    }
   }, [room.phase, room.paused, room.t, room.source])
 
   // Report position, buffer health and focus state once a second — and rescue a
@@ -55,26 +63,28 @@ export default function Room({ party }) {
     let lastT = -1
     let stalled = 0
     const id = setInterval(() => {
-      const v = video.current
-      if (!v) return
+      const p = video.current
+      if (!p) return
       // "Blocked" counts as not ready: otherwise the room pauses for us, sees our
       // clock match while it's stopped, resumes, and we fall behind again — an
       // endless waiting/resuming loop that spams the chat.
-      const starving = (v.readyState < 3 || blocked) && room.phase === 'playing'
+      // Watching muted is still watching — only a player that won't run at all
+      // holds the room up.
+      const starving = (p.ready() < 3 || blocked === 'play') && room.phase === 'playing'
       setBuffering(starving)
 
-      const shouldMove = room.phase === 'playing' && !room.paused && !v.paused
-      stalled = shouldMove && v.currentTime === lastT ? stalled + 1 : 0
-      lastT = v.currentTime
+      const now = p.time()
+      const shouldMove = room.phase === 'playing' && !room.paused && !p.isPaused()
+      stalled = shouldMove && now === lastT ? stalled + 1 : 0
+      lastT = now
       if (stalled >= 4) {
         stalled = 0
-        const at = Math.max(room.t, v.currentTime)
-        v.load()
-        const resume = () => { v.currentTime = at; v.play().catch(() => {}) }
-        v.readyState >= 1 ? resume() : v.addEventListener('loadedmetadata', resume, { once: true })
+        const at = Math.max(room.t, now)
+        p.reload()
+        setTimeout(() => { p.seek(at); p.play().catch(() => {}) }, 400)
       }
 
-      send({ type: 'tick', t: v.currentTime, buffering: starving, paused: v.paused, focus })
+      send({ type: 'tick', t: now, buffering: starving, paused: p.isPaused(), focus })
     }, 1000)
     return () => clearInterval(id)
   }, [send, focus, room.phase, room.paused, room.t, blocked])
@@ -130,9 +140,7 @@ export default function Room({ party }) {
   // and leaving either way leaves both.
   const enterFullScreen = () => {
     setFocus(true)
-    const el = shell.current
-    el?.requestFullscreen?.({ navigationUI: 'hide' }).catch(() => {})
-    if (!el?.requestFullscreen) video.current?.webkitEnterFullscreen?.() // iPhone Safari
+    shell.current?.requestFullscreen?.({ navigationUI: 'hide' }).catch(() => {})
   }
 
   const exitFocus = () => {
@@ -165,29 +173,34 @@ export default function Room({ party }) {
         {/* video surface */}
         <div className="relative flex-1 min-h-0 bg-black" onPointerDown={poke}>
           {room.source ? (
-            <video
-              ref={video}
-              src={room.source}
-              className="absolute inset-0 w-full h-full object-contain bg-black"
-              playsInline
-              preload="auto"
-              onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
-              onWaiting={() => setBuffering(true)}
-              onPlaying={() => setBuffering(false)}
-            />
+            room.kind === 'youtube' ? (
+              <YouTubePlayer key={room.source} ref={video} videoId={room.source} onDuration={setDuration} />
+            ) : (
+              <FilePlayer key={room.source} ref={video} src={room.source} onDuration={setDuration} />
+            )
           ) : (
             <div className="absolute inset-0 grid place-items-center text-white/40 text-sm px-6 text-center">
-              {isOwner ? 'Paste a PixelDrain link under the chat to begin' : 'Waiting for the host to pick something…'}
+              {isOwner ? 'Paste a YouTube or PixelDrain link under the chat to begin' : 'Waiting for the host to pick something…'}
             </div>
           )}
 
           {blocked && (
             <button
-              className="absolute inset-0 z-40 grid place-items-center bg-black/60"
-              onClick={() => video.current?.play().then(() => setBlocked(false)).catch(() => {})}
+              // 'sound' is playing silently and only needs unmuting, so it must not
+              // swallow taps meant for the film; 'play' isn't running at all.
+              className={`absolute z-40 grid place-items-center ${
+                blocked === 'sound' ? 'bottom-4 left-1/2 -translate-x-1/2' : 'inset-0 bg-black/60'
+              }`}
+              onClick={() => {
+                const p = video.current
+                if (!p) return
+                if (blocked === 'sound') { p.unmute(); setBlocked(false); return }
+                p.play().then(() => setBlocked(false)).catch(() => {})
+              }}
             >
-              <span className="liquid rounded-full px-6 h-12 grid place-items-center text-sm font-semibold card-in">
-                Tap to join the audio
+              <span className="liquid rounded-full px-6 h-12 flex items-center gap-2 text-sm font-semibold card-in">
+                <Volume2 size={16} />
+                {blocked === 'sound' ? 'Tap for sound' : 'Tap to play'}
               </span>
             </button>
           )}
@@ -645,7 +658,7 @@ function ChatPanel({ chat, pending, isOwner, send, youId, urlDraft, setUrlDraft 
             <input
               value={urlDraft}
               onChange={(e) => setUrlDraft(e.target.value)}
-              placeholder="https://pixeldrain.com/u/…"
+              placeholder="YouTube or PixelDrain link"
               className="flex-1 bg-white/6 rounded-full px-4 h-10 text-sm outline-none focus:bg-white/12 transition min-w-0"
             />
             <Button kind="ghost" type="submit" className="h-10 px-4 shrink-0 bg-white/6">

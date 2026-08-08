@@ -290,5 +290,29 @@ await new Promise((r) => setTimeout(r, 500))
 assert.equal(mate.last('state').room.ownerId, sj.you, 'a guest cannot take the crown')
 console.log('· only the host can hand over the crown')
 
+// 21. youtube: accepted, never probed, never proxied
+const ytc = client('yt')
+await ytc.ready
+ytc.send({ type: 'create', name: 'YT', cap: 2 })
+await ytc.wait((m) => m.type === 'joined')
+ytc.send({ type: 'source', url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=30s' })
+const ytState = await ytc.wait((m) => m.type === 'state' && m.room.source, 10000)
+assert.equal(ytState.room.kind, 'youtube', 'recognised as a youtube source')
+assert.equal(ytState.room.source, 'dQw4w9WgXcQ', 'the client gets the video id, not a byte URL')
+assert.equal(ytState.room.proxied, false, 'youtube bytes never touch this server')
+assert.ok(!ytState.room.source.startsWith('/stream/'), 'not routed through the proxy')
+
+// and the proxy refuses to fetch it even if someone asks directly
+const ytProxy = await fetch(
+  `http://localhost:${PORT}/stream/${Buffer.from('https://www.youtube.com/watch?v=dQw4w9WgXcQ').toString('base64url')}`)
+assert.equal(ytProxy.status, 403, 'youtube cannot be pulled through the stream route')
+console.log('· youtube accepted, embedded not proxied')
+
+// 22. a file source in the same server still proxies — the two paths coexist
+ytc.send({ type: 'source', url: 'https://pixeldrain.com/u/GKBvQx7Y' })
+const backToFile = await ytc.wait((m) => m.type === 'state' && m.room.kind === 'file', 15000, true)
+assert.equal(backToFile.room.proxied, true, 'switching back to a file still proxies')
+console.log('· switching between youtube and file sources works')
+
 console.log('\nok — end to end passed')
 done(0)

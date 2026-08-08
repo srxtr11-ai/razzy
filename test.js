@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { newCode, parsePixeldrain, resolveSource, laggards, syncAction, nextOwner, ALPHABET } from './lib.js'
+import { newCode, parsePixeldrain, parseYouTube, resolveSource, laggards, syncAction, nextOwner, ALPHABET } from './lib.js'
 
 // codes
 const c = newCode()
@@ -19,10 +19,26 @@ assert.equal(parsePixeldrain('https://pixeldrain.com/api/file/GKBvQx7Y'), 'GKBvQ
 assert.equal(parsePixeldrain('  https://pixeldrain.com/u/GKBvQx7Y  '), 'GKBvQx7Y')
 assert.equal(parsePixeldrain('https://example.com/movie.mp4'), null)
 assert.equal(parsePixeldrain(''), null)
-assert.equal(resolveSource('https://pixeldrain.com/u/GKBvQx7Y').url, 'https://pixeldrain.com/api/file/GKBvQx7Y')
-assert.equal(resolveSource('https://cdn.example.com/a.mp4').url, 'https://cdn.example.com/a.mp4')
+assert.equal(resolveSource('https://pixeldrain.com/u/GKBvQx7Y').source, 'https://pixeldrain.com/api/file/GKBvQx7Y')
+assert.equal(resolveSource('https://pixeldrain.com/u/GKBvQx7Y').kind, 'file')
+assert.equal(resolveSource('https://cdn.example.com/a.mp4').source, 'https://cdn.example.com/a.mp4')
 assert.equal(resolveSource('http://insecure.example.com/a.mp4'), null, 'https only')
-assert.equal(resolveSource('https://youtube.com/watch?v=x'), null, 'no DRM/player sites')
+
+// youtube — every URL shape carries the same 11-char id
+assert.equal(parseYouTube('https://www.youtube.com/watch?v=dQw4w9WgXcQ'), 'dQw4w9WgXcQ')
+assert.equal(parseYouTube('https://youtu.be/dQw4w9WgXcQ'), 'dQw4w9WgXcQ')
+assert.equal(parseYouTube('https://youtube.com/shorts/dQw4w9WgXcQ'), 'dQw4w9WgXcQ')
+assert.equal(parseYouTube('https://www.youtube.com/embed/dQw4w9WgXcQ'), 'dQw4w9WgXcQ')
+assert.equal(parseYouTube('https://www.youtube.com/live/dQw4w9WgXcQ'), 'dQw4w9WgXcQ')
+assert.equal(parseYouTube('https://m.youtube.com/watch?app=desktop&v=dQw4w9WgXcQ'), 'dQw4w9WgXcQ', 'id after other params')
+assert.equal(parseYouTube('https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s'), 'dQw4w9WgXcQ', 'trailing params ignored')
+assert.equal(parseYouTube('https://pixeldrain.com/u/GKBvQx7Y'), null)
+assert.equal(parseYouTube('https://example.com/watch?v=short'), null, 'needs a real 11-char id')
+
+const yt = resolveSource('https://youtu.be/dQw4w9WgXcQ')
+assert.equal(yt.kind, 'youtube')
+assert.equal(yt.source, 'dQw4w9WgXcQ', 'youtube carries the id, not a byte URL')
+assert.equal(resolveSource('https://example.com/page.html'), null, 'arbitrary pages still refused')
 
 // laggards: who holds the room up
 const M = (o) => ({ online: true, approved: true, buffering: false, t: 100, skipped: false, ...o })
