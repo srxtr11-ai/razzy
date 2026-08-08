@@ -1,0 +1,14 @@
+node_modules/
+dist/
+
+# Native build output and machine-specific paths
+android/build/
+android/app/build/
+android/.gradle/
+android/local.properties
+android/app/release/
+android/capacitor-cordova-android-plugins/build/
+*.apk
+*.aab
+*.keystore
+!razzy-release.keystore.example
