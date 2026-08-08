@@ -14,6 +14,14 @@ export const identity = () => {
 }
 export const remember = (name, avatar) => { ls.set('wp.name', name); ls.set('wp.avatar', avatar) }
 
+// Which party this browser was last in, so a refresh walks straight back in
+// instead of dumping you at the lobby while the party carries on without you.
+const lastParty = {
+  get: () => ls.get('wp.party', null),
+  set: (code) => ls.set('wp.party', code),
+  clear: () => localStorage.removeItem('wp.party'),
+}
+
 const WS_URL = () => `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`
 
 /**
@@ -32,6 +40,7 @@ export function useParty() {
 
   const ws = useRef(null)
   const intent = useRef(null) // what to (re)send on open
+  const inRoom = useRef(false) // have we ever actually got in? (ref: `open` never re-reads state)
   const onChat = useRef(() => {})
 
   const send = useCallback((msg) => {
@@ -44,6 +53,12 @@ export function useParty() {
 
     sock.onopen = () => {
       setConnected(true)
+      // On a fresh page load there's no intent yet — walk back into the party
+      // this browser was in. The server still has our seat under the same id.
+      if (!intent.current) {
+        const code = lastParty.get()
+        if (code) intent.current = { type: 'join', code, ...identity() }
+      }
       if (intent.current) sock.send(JSON.stringify(intent.current))
     }
 
@@ -60,7 +75,9 @@ export function useParty() {
         setRoom(m.room)
         setChat(m.chat || [])
         // reconnects rejoin by id instead of re-requesting entry
-        intent.current = { type: 'join', code: m.room.code, id: m.you, ...identity() }
+        intent.current = { type: 'join', code: m.room.code, ...identity(), id: m.you }
+        lastParty.set(m.room.code)
+        inRoom.current = true
         return
       }
       if (m.type === 'state') return setRoom(m.room)
@@ -71,8 +88,15 @@ export function useParty() {
       }
       if (m.type === 'joinreq') return setJoinReqs((q) => [...q, m])
       if (m.type === 'countdown') return setCountdown(m.n)
-      if (m.type === 'declined') { setDeclined(true); intent.current = null; ws.current = null; sock.close(); return }
-      if (m.type === 'error') return setError(m.error)
+      if (m.type === 'declined') {
+        setDeclined(true); lastParty.clear(); intent.current = null; ws.current = null; sock.close(); return
+      }
+      if (m.type === 'error') {
+        // the remembered party is gone (server restart, party ended) — don't
+        // retry it forever, just fall back to the lobby
+        if (!inRoom.current) { intent.current = null; lastParty.clear() }
+        return setError(m.error)
+      }
     }
   }, [])
 
@@ -101,6 +125,8 @@ export function useParty() {
 
   const leave = () => {
     intent.current = null
+    lastParty.clear()
+    inRoom.current = false
     setRoom(null)
     setChat([])
     setYouId(null)

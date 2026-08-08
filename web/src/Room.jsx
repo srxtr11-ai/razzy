@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { syncAction } from '../../lib.js'
-import { Check, Copy, Loader2, Maximize2, Pause, Play, Send, SkipForward, UserX, X } from 'lucide-react'
+import { Check, Copy, Loader2, Maximize2, Minimize2, Pause, Play, Send, SkipForward, UserX, X } from 'lucide-react'
 import { Avatar, Button, OwnerBadge, Signal, fmt, glare } from './ui.jsx'
 
 const CARD_MS = 4500
@@ -19,6 +19,7 @@ export default function Room({ party }) {
   const [urlDraft, setUrlDraft] = useState('')
   const hideTimer = useRef(null)
   const cardTimers = useRef(new Map())
+  const shell = useRef(null)
 
   const pending = room.members.filter((m) => !m.approved)
   const waitingNames = room.waiting.map((id) => room.members.find((m) => m.id === id)?.name).filter(Boolean)
@@ -41,17 +42,38 @@ export default function Room({ party }) {
     if (v.paused) v.play().then(() => setBlocked(false)).catch(() => setBlocked(true))
   }, [room.phase, room.paused, room.t, room.source])
 
-  // Report position, buffer health and focus state once a second.
+  // Report position, buffer health and focus state once a second — and rescue a
+  // wedged element. Chrome sometimes suspends a media load and never resumes it:
+  // readyState drops to 0 with the network "loading" but no socket open, and the
+  // film sits frozen forever. Nothing recovers that on its own, so if we should
+  // be playing and the clock hasn't moved for a few seconds, reload and re-seek.
   useEffect(() => {
+    let lastT = -1
+    let stalled = 0
     const id = setInterval(() => {
       const v = video.current
       if (!v) return
-      const starving = v.readyState < 3 && room.phase === 'playing'
+      // "Blocked" counts as not ready: otherwise the room pauses for us, sees our
+      // clock match while it's stopped, resumes, and we fall behind again — an
+      // endless waiting/resuming loop that spams the chat.
+      const starving = (v.readyState < 3 || blocked) && room.phase === 'playing'
       setBuffering(starving)
+
+      const shouldMove = room.phase === 'playing' && !room.paused && !v.paused
+      stalled = shouldMove && v.currentTime === lastT ? stalled + 1 : 0
+      lastT = v.currentTime
+      if (stalled >= 4) {
+        stalled = 0
+        const at = Math.max(room.t, v.currentTime)
+        v.load()
+        const resume = () => { v.currentTime = at; v.play().catch(() => {}) }
+        v.readyState >= 1 ? resume() : v.addEventListener('loadedmetadata', resume, { once: true })
+      }
+
       send({ type: 'tick', t: v.currentTime, buffering: starving, paused: v.paused, focus })
     }, 1000)
     return () => clearInterval(id)
-  }, [send, focus, room.phase])
+  }, [send, focus, room.phase, room.paused, room.t, blocked])
 
   /* ------------------------------------------------- notification cards */
 
@@ -97,12 +119,35 @@ export default function Room({ party }) {
   }
   useEffect(() => { poke(); return () => clearTimeout(hideTimer.current) }, [focus, playing]) // eslint-disable-line
 
-  const exitFocus = () => setFocus(false)
+  /* ------------------------------------------------------- full screen */
+
+  // Full screen means full screen: the phone's tab bar and address bar go too.
+  // The two are one control — entering asks the browser for real fullscreen,
+  // and leaving either way leaves both.
+  const enterFullScreen = () => {
+    setFocus(true)
+    const el = shell.current
+    el?.requestFullscreen?.({ navigationUI: 'hide' }).catch(() => {})
+    if (!el?.requestFullscreen) video.current?.webkitEnterFullscreen?.() // iPhone Safari
+  }
+
+  const exitFocus = () => {
+    setFocus(false)
+    if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {})
+  }
+
+  // Escape, the phone's back gesture and the browser's own exit button all
+  // leave fullscreen without telling us — follow them out of focus mode.
+  useEffect(() => {
+    const onChange = () => { if (!document.fullscreenElement) setFocus(false) }
+    document.addEventListener('fullscreenchange', onChange)
+    return () => document.removeEventListener('fullscreenchange', onChange)
+  }, [])
 
   /* ------------------------------------------------------------ render */
 
   return (
-    <div className="h-full w-full flex flex-col lg:flex-row bg-ink overflow-hidden">
+    <div ref={shell} className="h-full w-full flex flex-col lg:flex-row bg-ink overflow-hidden">
       {/* ================= stage ================= */}
       <main className="relative flex-1 min-w-0 min-h-0 flex flex-col">
         {/* docked header — collapses in focus mode */}
@@ -189,8 +234,8 @@ export default function Room({ party }) {
               onPointerMove={glare.onPointerMove}
               className="liquid glare press rounded-2xl pl-3 pr-4 h-11 flex items-center gap-2 text-xs font-semibold"
             >
-              <X size={15} />
-              Exit focus
+              <Minimize2 size={15} />
+              Exit
             </button>
           </div>
 
@@ -223,7 +268,7 @@ export default function Room({ party }) {
         >
           <Controls
             room={room} you={you} isOwner={isOwner} send={send} duration={duration}
-            onFocus={() => setFocus(true)} unread={unread}
+            onFocus={enterFullScreen} unread={unread}
             urlDraft={urlDraft} setUrlDraft={setUrlDraft}
           />
         </div>
@@ -406,7 +451,7 @@ function Controls({ room, you, isOwner, send, duration, onFocus, unread, urlDraf
 
         <Button kind="ghost" onClick={onFocus} className="relative shrink-0 flex items-center gap-2">
           <Maximize2 size={15} />
-          Focus
+          <span className="hidden sm:inline">Full screen</span>
           {unread > 0 && (
             <span className="absolute -top-1 -right-1 min-w-5 h-5 px-1 rounded-full bg-grass text-black text-[11px] font-bold grid place-items-center">
               {unread > 99 ? '99+' : unread}

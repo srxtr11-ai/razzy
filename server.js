@@ -18,6 +18,7 @@ const OWNER_GRACE_MS = Number(process.env.OWNER_GRACE_MS) || 60_000 // crown pas
 const ROOM_TTL_MS = 10 * 60_000 // empty room dies after this
 const MAX_MSG = 500
 const CHAT_KEEP = 200
+const TYPING_TTL_MS = 4000 // typing flag self-expires; clients don't reliably say 'stopped'
 
 /* ---------------------------------------------------------------- storage */
 
@@ -66,7 +67,11 @@ function publicRoom(r) {
     members: [...r.members.values()].map((m) => ({
       id: m.id, name: m.name, avatar: m.avatar, approved: m.approved, online: m.online,
       ready: !!m.ready, buffering: !!m.buffering, paused: !!m.paused, focus: !!m.focus,
-      typing: !!m.typing, skipped: !!m.skipped, ping: m.ping ?? null, joinedAt: m.joinedAt,
+      // Typing expires on its own. A client that goes to focus mode, closes the
+      // tab or just stops mid-word never sends "stopped", so a sticky flag left
+      // people permanently "typing…".
+      typing: !!(m.online && m.typingAt && Date.now() - m.typingAt < TYPING_TTL_MS),
+      skipped: !!m.skipped, ping: m.ping ?? null, joinedAt: m.joinedAt,
     })),
   }
 }
@@ -257,16 +262,34 @@ app.get('/stream/:b64', async (req, reply) => {
   try { target = Buffer.from(req.params.b64, 'base64url').toString() } catch { return reply.code(400).send() }
   if (![...rooms.values()].some((r) => r.origin === target)) return reply.code(403).send({ error: 'not a live source' })
 
-  const upstream = await fetch(target, {
-    headers: { 'User-Agent': UA, ...(req.headers.range ? { Range: req.headers.range } : {}) },
-  })
+  // A <video> abandons range requests constantly (pause, seek, buffer-ahead).
+  // Without this the upstream fetch to the host lives on, leaking a connection
+  // per abandoned request until the host starts refusing us.
+  const ac = new AbortController()
+  req.raw.on('close', () => ac.abort())
+
+  let upstream
+  try {
+    upstream = await fetch(target, {
+      headers: { 'User-Agent': UA, ...(req.headers.range ? { Range: req.headers.range } : {}) },
+      signal: ac.signal,
+    })
+  } catch {
+    if (!ac.signal.aborted) return reply.code(502).send({ error: 'upstream unreachable' })
+    return
+  }
+
   reply.code(upstream.status)
   for (const h of ['content-type', 'content-length', 'content-range', 'accept-ranges']) {
     const v = upstream.headers.get(h)
     if (v) reply.header(h, v)
   }
   reply.header('cache-control', 'no-store')
-  return reply.send(upstream.body ? Readable.fromWeb(upstream.body) : null)
+  if (!upstream.body) return reply.send(null)
+
+  const body = Readable.fromWeb(upstream.body)
+  body.on('error', () => {}) // client hung up mid-chunk: normal, not a crash
+  return reply.send(body)
 })
 
 app.get('/api/party/:code', async (req, reply) => {
@@ -448,13 +471,13 @@ wss.on('connection', (ws) => {
       return
     }
 
-    if (m.type === 'typing') { me.typing = !!m.on; return }
+    if (m.type === 'typing') { me.typingAt = m.on ? Date.now() : 0; return }
 
     if (m.type === 'chat') {
       if (!me.approved) return
       const text = String(m.text || '').slice(0, MAX_MSG).trim()
       if (!text) return
-      me.typing = false
+      me.typingAt = 0
       const msg = { id: randomUUID(), kind: 'user', from: me.id, name: me.name, avatar: me.avatar, text, at: Date.now() }
       room.chat.push(msg)
       if (room.chat.length > CHAT_KEEP) room.chat.shift()
@@ -471,6 +494,7 @@ wss.on('connection', (ws) => {
     me.ws = null
     me.ready = false
     me.buffering = false
+    me.typingAt = 0
     if (!me.approved) room.members.delete(me.id) // never approved, never existed
     pushState(room)
   })

@@ -215,5 +215,25 @@ const soloGo = await solo.wait((m) => m.type === 'state' && m.room.phase === 'pl
 assert.equal(soloGo.room.paused, false, 'solo host starts playing on its own')
 console.log('· solo host starts without a second person')
 
+// 15. the typing flag expires on its own — clients stop mid-word without saying so
+guest.send({ type: 'typing', on: true })
+await new Promise((r) => setTimeout(r, 1200))
+assert.equal(guest.last('state').room.members.find((m) => m.id === guestJoined.you).typing, true, 'typing shows')
+await new Promise((r) => setTimeout(r, 4200)) // past TYPING_TTL_MS, without a "stopped"
+assert.equal(guest.last('state').room.members.find((m) => m.id === guestJoined.you).typing, false, 'typing expires by itself')
+console.log('· typing indicator expires instead of sticking')
+
+// 16. abandoned stream requests must not take the server down or leak upstream
+const src = `http://localhost:${PORT}${withSrc.room.source}`
+for (let i = 0; i < 5; i++) {
+  const ac = new AbortController()
+  const res = await fetch(src, { signal: ac.signal })
+  await res.body.getReader().read()
+  ac.abort() // exactly what a <video> does on pause/seek
+}
+await new Promise((r) => setTimeout(r, 800))
+assert.equal((await fetch(`http://localhost:${PORT}/api/party/${code}`)).status, 200, 'server survives abandoned streams')
+console.log('· abandoned stream requests are cleaned up')
+
 console.log('\nok — end to end passed')
 done(0)

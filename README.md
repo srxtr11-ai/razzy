@@ -71,7 +71,9 @@ node guest.js ABC Sara 8080   # joins party ABC and chats every few seconds
 | Entry | 3-letter code, host accepts or declines each person in chat. |
 | Owner leaves | Room pauses. After the grace period the crown passes to the longest-present member, still paused. |
 | Avatars | Downscaled to 128px in the browser, posted as a data URL, written to the volume. No bucket, no multipart. |
-| Focus mode | Header, control bar and chat collapse out of the layout (0.5s, Apple spring curve) and the film fills the screen. Every message pops a glass card — reply inline to stay, tap the body to leave into chat. Tap the screen for the exit chip. |
+| Full screen | One control. Header, control bar and chat collapse out of the layout (0.5s, Apple spring curve) *and* the browser goes truly fullscreen, so the phone's tabs and address bar go too. Exit leaves both; so does Escape or the back gesture, via a `fullscreenchange` listener. Every message pops a glass card — reply inline to stay, tap the body to leave into chat. Tap the screen for the exit chip. |
+| Stall recovery | Chrome sometimes suspends a media load and never resumes — `readyState 0`, network "loading", no socket, film frozen. If the room is playing and the local clock hasn't moved for 4s, the player reloads and re-seeks to the room position. |
+| Refresh | The party code is remembered, so reloading walks straight back in under the same identity instead of dropping you at the lobby. |
 | Look | Liquid glass: deep blur, multi-layer inset shadows, an aqua `::before` reflection and a pointer-tracked glare, over dark green ambient light. Chat and controls are docked panels, not floating overlays. |
 
 ## Limits worth knowing
