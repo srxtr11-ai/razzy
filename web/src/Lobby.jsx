@@ -1,0 +1,130 @@
+import { useRef, useState } from 'react'
+import { Camera, LogIn, Minus, Plus, Sparkles } from 'lucide-react'
+import { identity, remember, uploadAvatar } from './party.js'
+import { Avatar, Button, glare } from './ui.jsx'
+
+/** Ambient colour for the glass to refract — without it, glass reads as grey. */
+export function Ambient() {
+  return (
+    <div className="fixed inset-0 -z-10 overflow-hidden bg-ink">
+      <div className="blob w-[50vw] h-[50vw] -top-[10%] -left-[10%] bg-grass" />
+      <div className="blob w-[45vw] h-[45vw] -bottom-[10%] -right-[10%] bg-emerald-400" style={{ animationDelay: '-5s' }} />
+      <div className="blob w-[35vw] h-[35vw] top-[30%] left-[40%] bg-teal-500" style={{ animationDelay: '-10s' }} />
+    </div>
+  )
+}
+
+export default function Lobby({ party }) {
+  const me = identity()
+  const [name, setName] = useState(me.name)
+  const [avatar, setAvatar] = useState(me.avatar)
+  const [code, setCode] = useState('')
+  const [cap, setCap] = useState(6)
+  const [busy, setBusy] = useState(false)
+  const file = useRef(null)
+
+  const ready = name.trim().length > 0
+  const save = () => remember(name.trim(), avatar)
+
+  const pick = async (e) => {
+    const f = e.target.files?.[0]
+    if (!f) return
+    setBusy(true)
+    try { setAvatar(await uploadAvatar(f)) } catch { party.setError('Could not upload that image') }
+    setBusy(false)
+  }
+
+  return (
+    <>
+      <Ambient />
+      <div className="min-h-full grid place-items-center p-6">
+        <div className="w-full max-w-sm rise">
+          <h1 className="text-4xl font-bold tracking-tight text-center mb-1">
+            Watch<span className="text-grass">Party</span>
+          </h1>
+          <p className="text-center text-white/40 text-sm mb-8">Same movie. Same second.</p>
+
+          <div className="liquid glare rounded-[2rem] p-5 space-y-5" onPointerMove={glare.onPointerMove}>
+            <div className="flex items-center gap-4">
+              <button onClick={() => file.current?.click()} className="press relative rounded-full" aria-label="Choose profile picture">
+                <Avatar m={{ name, avatar }} size={60} dim={busy} />
+                <span className="absolute -bottom-0.5 -right-0.5 w-7 h-7 rounded-full bg-grass text-black grid place-items-center ring-2 ring-ink">
+                  <Camera size={14} strokeWidth={2.5} />
+                </span>
+              </button>
+              <input ref={file} type="file" accept="image/*" hidden onChange={pick} />
+              <input
+                value={name}
+                onChange={(e) => setName(e.target.value.slice(0, 24))}
+                placeholder="Your name"
+                className="flex-1 bg-white/8 rounded-full px-4 h-12 outline-none focus:bg-white/12 transition min-w-0"
+              />
+            </div>
+
+            <div className="h-px bg-white/10" />
+
+            <div className="space-y-2">
+              <label className="text-[11px] uppercase tracking-[0.2em] text-white/35">Join a party</label>
+              <div className="flex gap-2">
+                <input
+                  value={code}
+                  onChange={(e) => setCode(e.target.value.toUpperCase().replace(/[^A-Z]/g, '').slice(0, 3))}
+                  placeholder="ABC"
+                  autoCapitalize="characters"
+                  className="w-28 bg-white/8 rounded-2xl px-3 h-12 text-center text-2xl font-bold tracking-[0.3em] outline-none focus:bg-white/12 transition"
+                />
+                <Button
+                  kind="primary"
+                  className="flex-1 flex items-center justify-center gap-2"
+                  disabled={!ready || code.length !== 3}
+                  onClick={() => { save(); party.join(code, name.trim(), avatar) }}
+                >
+                  <LogIn size={16} />
+                  Join
+                </Button>
+              </div>
+            </div>
+
+            <div className="h-px bg-white/10" />
+
+            <div className="space-y-2">
+              <label className="text-[11px] uppercase tracking-[0.2em] text-white/35">Start a party</label>
+              <div className="flex items-center justify-between text-sm text-white/70">
+                <span>Max people</span>
+                <div className="flex items-center gap-3">
+                  <button
+                    className="press w-9 h-9 rounded-full bg-white/8 grid place-items-center hover:bg-white/15"
+                    onClick={() => setCap((c) => Math.max(2, c - 1))}
+                    aria-label="Fewer people"
+                  >
+                    <Minus size={15} />
+                  </button>
+                  <span className="w-6 text-center font-semibold text-white tabular-nums">{cap}</span>
+                  <button
+                    className="press w-9 h-9 rounded-full bg-white/8 grid place-items-center hover:bg-white/15"
+                    onClick={() => setCap((c) => Math.min(50, c + 1))}
+                    aria-label="More people"
+                  >
+                    <Plus size={15} />
+                  </button>
+                </div>
+              </div>
+              <Button
+                kind="primary"
+                className="w-full flex items-center justify-center gap-2"
+                disabled={!ready}
+                onClick={() => { save(); party.create(name.trim(), avatar, cap) }}
+              >
+                <Sparkles size={16} />
+                Create party
+              </Button>
+            </div>
+          </div>
+
+          {party.error && <p className="mt-4 text-center text-sm text-red-400 rise">{party.error}</p>}
+          {!party.connected && <p className="mt-4 text-center text-xs text-white/30">Connecting…</p>}
+        </div>
+      </div>
+    </>
+  )
+}

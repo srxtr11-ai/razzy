@@ -1,0 +1,219 @@
+// End-to-end: boots the real server, runs a two-person party through create ->
+// join request -> approve -> load -> ready check -> countdown -> playing -> chat.
+// Run: node smoke.js
+import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
+import fs from 'node:fs'
+import { createServer } from 'node:net'
+import path from 'node:path'
+import { WebSocket } from 'ws'
+
+// Ask the OS for a free port rather than hard-coding one — Windows reserves
+// scattered ranges (Hyper-V etc.) and a fixed port hits EACCES at random.
+const PORT = await new Promise((res, rej) => {
+  const s = createServer()
+  s.on('error', rej)
+  s.listen(0, '0.0.0.0', () => {
+    const { port } = s.address()
+    s.close(() => res(port))
+  })
+})
+const DATA = path.join(import.meta.dirname, '.smoke-data')
+fs.rmSync(DATA, { recursive: true, force: true })
+
+const server = spawn(process.execPath, ['server.js'], {
+  cwd: import.meta.dirname,
+  env: { ...process.env, PORT, DATA_DIR: DATA, OWNER_GRACE_MS: 2000 },
+  stdio: ['ignore', 'pipe', 'inherit'],
+})
+const done = async (code) => {
+  server.kill()
+  await new Promise((r) => setTimeout(r, 300)) // let sqlite release the file on Windows
+  try { fs.rmSync(DATA, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }) } catch {}
+  process.exit(code)
+}
+process.on('uncaughtException', (e) => { console.error(e); done(1) })
+
+await new Promise((r) => server.stdout.on('data', (b) => String(b).includes('watchparty on') && r()))
+
+function client(label) {
+  const ws = new WebSocket(`ws://localhost:${PORT}/ws`)
+  const seen = []
+  ws.on('message', (raw) => {
+    const m = JSON.parse(raw)
+    if (m.type === 'ping') return ws.send(JSON.stringify({ type: 'pong', ts: m.ts }))
+    seen.push(m)
+  })
+  return {
+    label, ws, seen,
+    ready: new Promise((r) => ws.on('open', r)),
+    send: (m) => ws.send(JSON.stringify(m)),
+    // `fresh` ignores anything already buffered — state messages arrive every second,
+    // so an old one will happily satisfy a predicate about a change that hasn't happened yet.
+    wait: (pred, ms = 8000, fresh = false) =>
+      new Promise((res, rej) => {
+        const hit = fresh ? null : seen.find(pred)
+        if (hit) return res(hit)
+        const t = setTimeout(() => rej(new Error(`${label}: timeout waiting for message`)), ms)
+        const on = (raw) => {
+          const m = JSON.parse(raw)
+          if (pred(m)) { clearTimeout(t); ws.off('message', on); res(m) }
+        }
+        ws.on('message', on)
+      }),
+    last: (type) => [...seen].reverse().find((m) => m.type === type),
+  }
+}
+
+const host = client('host')
+const guest = client('guest')
+await Promise.all([host.ready, guest.ready])
+
+// 0. a client sitting in the lobby must never be told off for keepalives
+const idle = client('idle')
+await idle.ready
+await new Promise((r) => setTimeout(r, 3500)) // one ping cycle
+assert.ok(!idle.seen.some((m) => m.type === 'error'), 'lobby keepalive is silent')
+idle.ws.close()
+
+// 1. create
+host.send({ type: 'create', name: 'Host', cap: 4 })
+const created = await host.wait((m) => m.type === 'joined')
+const code = created.room.code
+assert.equal(code.length, 3, 'party code is 3 letters')
+console.log('· created party', code)
+
+// 2. guest asks to join, host is notified, guest is not yet approved
+guest.send({ type: 'join', code, name: 'Guest' })
+const req = await host.wait((m) => m.type === 'joinreq')
+assert.equal(req.name, 'Guest')
+const guestJoined = await guest.wait((m) => m.type === 'joined')
+assert.equal(guestJoined.room.members.find((m) => m.id === guestJoined.you).approved, false, 'waits at the door')
+console.log('· join request reached the host')
+
+// 3. guest cannot chat before approval
+guest.send({ type: 'chat', text: 'let me in' })
+await new Promise((r) => setTimeout(r, 300))
+assert.ok(!host.seen.some((m) => m.type === 'chat' && m.msg.text === 'let me in'), 'unapproved cannot talk')
+
+// 4. approve
+host.send({ type: 'approve', id: req.id, ok: true })
+await guest.wait((m) => m.type === 'state' && m.room.members.find((x) => x.id === guestJoined.you)?.approved)
+console.log('· guest approved')
+
+// 5. only the owner can load a source, and only direct files are accepted
+guest.send({ type: 'source', url: 'https://pixeldrain.com/u/GKBvQx7Y' })
+await new Promise((r) => setTimeout(r, 200))
+assert.equal(host.last('state').room.source, null, 'guest cannot set the source')
+
+host.send({ type: 'source', url: 'https://www.youtube.com/watch?v=abc' })
+await host.wait((m) => m.type === 'error')
+host.send({ type: 'source', url: 'https://pixeldrain.com/u/GKBvQx7Y' })
+const withSrc = await guest.wait((m) => m.type === 'state' && m.room.source, 15000)
+assert.equal(withSrc.room.origin, 'https://pixeldrain.com/api/file/GKBvQx7Y', 'pixeldrain link resolved')
+// PixelDrain blocks cross-site playback, so the server must have chosen to stream it
+assert.equal(withSrc.room.proxied, true, 'hotlink-blocking host gets proxied')
+assert.match(withSrc.room.source, /^\/stream\//, 'client is pointed at our stream route')
+console.log('· source resolved, hotlink block detected -> proxying')
+
+// the stream route must actually return video bytes, and refuse anything not a live source
+const ranged = await fetch(`http://localhost:${PORT}${withSrc.room.source}`, { headers: { Range: 'bytes=0-999' } })
+assert.equal(ranged.status, 206, 'range request passes through')
+assert.equal(ranged.headers.get('content-type'), 'video/mp4', 'video content type preserved')
+assert.equal((await ranged.arrayBuffer()).byteLength, 1000, 'exactly the requested bytes')
+const openProxy = await fetch(`http://localhost:${PORT}/stream/${Buffer.from('https://example.com/evil.mp4').toString('base64url')}`)
+assert.equal(openProxy.status, 403, 'not usable as an open proxy')
+console.log('· stream route serves ranges and refuses foreign URLs')
+
+// 6. ready check -> countdown -> playing
+host.send({ type: 'start' })
+await guest.wait((m) => m.type === 'state' && m.room.phase === 'ready')
+host.send({ type: 'tick', t: 0, buffering: false })
+guest.send({ type: 'tick', t: 0, buffering: false })
+guest.send({ type: 'ready' })
+const three = await guest.wait((m) => m.type === 'countdown')
+assert.equal(three.n, 3, 'countdown starts at 3')
+const playing = await guest.wait((m) => m.type === 'state' && m.room.phase === 'playing' && !m.room.paused, 10000)
+assert.equal(playing.room.paused, false, 'room is playing')
+console.log('· ready check + countdown -> playing')
+
+// 7. the room clock advances
+const t0 = playing.room.t
+host.send({ type: 'tick', t: t0 + 2, buffering: false })
+await new Promise((r) => setTimeout(r, 1500))
+assert.ok(host.last('state').room.t > t0, 'clock advanced')
+
+// 8. anyone can pause
+guest.send({ type: 'pause' })
+const paused = await host.wait((m) => m.type === 'state' && m.room.paused, 8000, true)
+assert.equal(paused.room.pausedBy, guestJoined.you, 'the room knows who paused')
+console.log('· guest paused the room')
+
+// 9. a straggler holds the room, and the owner can skip them
+guest.send({ type: 'tick', t: 0, buffering: true })
+await new Promise((r) => setTimeout(r, 1400))
+assert.ok(host.last('state').room.waiting.includes(guestJoined.you), 'buffering guest holds the room')
+host.send({ type: 'skip', id: guestJoined.you })
+await host.wait((m) => m.type === 'state' && !m.room.waiting.length, 8000, true)
+console.log('· straggler detected, then skipped')
+
+// 10. chat reaches everyone
+guest.send({ type: 'chat', text: 'this is the funny part' })
+const got = await host.wait((m) => m.type === 'chat' && m.msg.text === 'this is the funny part')
+assert.equal(got.msg.name, 'Guest')
+console.log('· chat delivered')
+
+// 11. avatar upload round-trips to disk
+const px = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+const up = await fetch(`http://localhost:${PORT}/api/avatar`, {
+  method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ dataUrl: px }),
+}).then((r) => r.json())
+assert.ok(up.url.startsWith('/avatars/'), 'avatar stored')
+assert.equal((await fetch(`http://localhost:${PORT}${up.url}`)).status, 200, 'avatar served back')
+const bad = await fetch(`http://localhost:${PORT}/api/avatar`, {
+  method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ dataUrl: 'javascript:alert(1)' }),
+})
+assert.equal(bad.status, 400, 'non-image rejected')
+console.log('· avatars upload, serve, and reject junk')
+
+// 12. party is full
+const extra = []
+for (let i = 0; i < 2; i++) { // cap is 4 and host+guest already hold two seats
+  const c = client('x' + i)
+  await c.ready
+  c.send({ type: 'join', code, name: 'X' + i })
+  extra.push(c)
+  const r = await host.wait((m) => m.type === 'joinreq' && m.name === 'X' + i)
+  host.send({ type: 'approve', id: r.id, ok: true })
+  await new Promise((res) => setTimeout(res, 120))
+}
+const full = client('full')
+await full.ready
+full.send({ type: 'join', code, name: 'TooMany' })
+const err = await full.wait((m) => m.type === 'error')
+assert.match(err.error, /full/i, 'cap enforced')
+console.log('· member cap enforced')
+
+// 13. owner drops -> room pauses -> crown passes to the longest-present member
+host.ws.close()
+const orphan = await guest.wait((m) => m.type === 'state' && m.room.paused, 8000, true)
+assert.equal(orphan.room.ownerId, created.you, 'still the original owner during the grace period')
+const crowned = await guest.wait((m) => m.type === 'state' && m.room.ownerId !== created.you, 10000, true)
+assert.equal(crowned.room.ownerId, guestJoined.you, 'longest-present member takes the crown')
+assert.equal(crowned.room.paused, true, 'stays paused for the new owner to resume')
+console.log('· owner dropped -> paused -> crown transferred')
+
+// 14. a host watching alone starts without waiting for a ready tap from anyone
+const solo = client('solo')
+await solo.ready
+solo.send({ type: 'create', name: 'Solo', cap: 2 })
+await solo.wait((m) => m.type === 'joined')
+solo.send({ type: 'source', url: 'https://pixeldrain.com/u/GKBvQx7Y' })
+await solo.wait((m) => m.type === 'state' && m.room.source, 15000)
+solo.send({ type: 'start' })
+const soloGo = await solo.wait((m) => m.type === 'state' && m.room.phase === 'playing', 15000)
+assert.equal(soloGo.room.paused, false, 'solo host starts playing on its own')
+console.log('· solo host starts without a second person')
+
+console.log('\nok — end to end passed')
+done(0)

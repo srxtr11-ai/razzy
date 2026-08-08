@@ -1,0 +1,17 @@
+{
+  "name": "watchparty",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.5" },
+  "scripts": {
+    "dev": "npm run dev --prefix web",
+    "build": "npm install --prefix web && npm run build --prefix web",
+    "start": "node server.js",
+    "test": "node test.js"
+  },
+  "dependencies": {
+    "@fastify/static": "^8.0.0",
+    "fastify": "^5.0.0",
+    "ws": "^8.18.0"
+  }
+}

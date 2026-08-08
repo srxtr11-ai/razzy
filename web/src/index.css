@@ -1,0 +1,192 @@
+@import 'tailwindcss';
+
+@theme {
+  --color-ink: #08090b;
+  --color-ink-2: #0f1216;
+  --color-grass: #22c55e;
+  --color-grass-dim: #16a34a;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Segoe UI', Roboto, sans-serif;
+  --ease-spring: cubic-bezier(0.34, 1.2, 0.64, 1);
+  --ease-press: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* Liquid glass tokens — dark/green reading of the Apple liquid bar. */
+:root {
+  /* Opaque enough to read white text over a bright film frame — 0.45 looked
+     prettier on a dark scene and became unreadable on a bright one. */
+  --glass-bg: rgba(14, 17, 21, 0.72);
+  --glass-border: rgba(255, 255, 255, 0.14);
+  --glass-shadow: rgba(0, 0, 0, 0.8);
+  --glass-highlight: rgba(255, 255, 255, 0.24);
+  --glass-caustic: rgba(120, 255, 175, 0.07);
+  --reflection-start: rgba(255, 255, 255, 0.14);
+  --reflection-end: rgba(255, 255, 255, 0);
+  --glare-color: rgba(120, 255, 175, 0.18);
+  --pill-bg: rgba(34, 197, 94, 0.22);
+  --pill-shadow: 0 4px 12px rgba(0, 0, 0, 0.4), inset 0 1px 1px rgba(255, 255, 255, 0.2);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-ink);
+  color: #e8eaed;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* ---------------------------------------------------------- liquid glass */
+
+/* The housing: deep blur, multi-layer shadow for real volume, light edge on
+   top, refracted caustic below, hairline outer shell. */
+.liquid {
+  position: relative;
+  background: var(--glass-bg);
+  backdrop-filter: blur(40px) saturate(190%);
+  -webkit-backdrop-filter: blur(40px) saturate(190%);
+  box-shadow:
+    0 40px 80px -20px var(--glass-shadow),
+    0 10px 30px -10px var(--glass-shadow),
+    inset 0 2px 3px -1px var(--glass-highlight),
+    inset 0 -2px 4px -1px var(--glass-caustic),
+    inset 0 0 0 1px var(--glass-border);
+  transition: background 0.5s ease, box-shadow 0.5s ease;
+}
+
+/* The wet aqua curve across the top edge. */
+.liquid::before {
+  content: '';
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  right: 1px;
+  height: 46%;
+  border-radius: inherit;
+  border-bottom-left-radius: 24px;
+  border-bottom-right-radius: 24px;
+  background: linear-gradient(180deg, var(--reflection-start) 0%, var(--reflection-end) 100%);
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* Cheaper variant: static surfaces and anything sitting over live video on
+   mobile, where a 40px backdrop blur costs real frames. */
+.liquid-lite {
+  background: color-mix(in srgb, var(--color-ink-2) 88%, transparent);
+  backdrop-filter: blur(10px) saturate(150%);
+  -webkit-backdrop-filter: blur(10px) saturate(150%);
+  box-shadow: inset 0 1px 1px -1px var(--glass-highlight), inset 0 0 0 1px var(--glass-border);
+}
+
+/* Pointer-tracked light cone. Set --x/--y from JS. */
+.glare::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  background: radial-gradient(circle 120px at var(--x, 50%) var(--y, 50%), var(--glare-color) 0%, transparent 100%);
+  mix-blend-mode: overlay;
+  pointer-events: none;
+  z-index: 2;
+}
+.glare:hover::after {
+  opacity: 1;
+}
+
+.liquid > *,
+.liquid-lite > * {
+  position: relative;
+  z-index: 3;
+}
+
+/* Physical press. */
+.press {
+  transition: transform 0.2s var(--ease-press), color 0.3s ease, background 0.3s ease;
+}
+.press:active {
+  transform: scale(0.92);
+}
+
+/* ------------------------------------------------------------ animations */
+
+@keyframes card-in {
+  from {
+    opacity: 0;
+    transform: translateY(-22px) scale(0.9);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.card-in {
+  animation: card-in 0.45s var(--ease-spring);
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.rise {
+  animation: rise 0.35s var(--ease-spring);
+}
+
+@keyframes blob-float {
+  0% {
+    transform: translate(0, 0) scale(1);
+  }
+  33% {
+    transform: translate(5%, 10%) scale(1.05);
+  }
+  66% {
+    transform: translate(-5%, 5%) scale(0.95);
+  }
+  100% {
+    transform: translate(0, -10%) scale(1.1);
+  }
+}
+
+/* Ambient colour behind the glass — without something to refract, glass reads
+   as flat grey. */
+.blob {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(110px);
+  opacity: 0.18; /* light through dark, not a green field */
+  animation: blob-float 20s infinite alternate cubic-bezier(0.45, 0.05, 0.55, 0.95);
+  will-change: transform;
+  pointer-events: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  scrollbar-width: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card-in,
+  .rise,
+  .blob {
+    animation: none;
+  }
+  .press:active {
+    transform: none;
+  }
+}
