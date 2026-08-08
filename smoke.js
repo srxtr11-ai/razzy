@@ -235,5 +235,60 @@ await new Promise((r) => setTimeout(r, 800))
 assert.equal((await fetch(`http://localhost:${PORT}/api/party/${code}`)).status, 200, 'server survives abandoned streams')
 console.log('· abandoned stream requests are cleaned up')
 
+// 17. leaving: the host can't abandon a room that still has people in it
+const p1 = client('p1')
+const p2 = client('p2')
+await Promise.all([p1.ready, p2.ready])
+p1.send({ type: 'create', name: 'Owner', cap: 4 })
+const p1j = await p1.wait((m) => m.type === 'joined')
+const roomCode = p1j.room.code
+p2.send({ type: 'join', code: roomCode, name: 'Second' })
+const p2j = await p2.wait((m) => m.type === 'joined')
+const rq = await p1.wait((m) => m.type === 'joinreq' && m.name === 'Second')
+p1.send({ type: 'approve', id: rq.id, ok: true })
+await p2.wait((m) => m.type === 'state' && m.room.members.find((x) => x.id === p2j.you)?.approved)
+
+p1.send({ type: 'leave' })
+const refused = await p1.wait((m) => m.type === 'error')
+assert.match(refused.error, /host/i, 'host is stopped from leaving people behind')
+assert.ok(!p1.seen.some((m) => m.type === 'left'), 'and did not leave')
+console.log('· host cannot leave without handing over')
+
+// 18. hand the crown over, then leaving works
+p1.send({ type: 'promote', id: p2j.you })
+const promoted = await p2.wait((m) => m.type === 'state' && m.room.ownerId === p2j.you, 8000, true)
+assert.equal(promoted.room.ownerId, p2j.you, 'crown handed over on request')
+p1.send({ type: 'leave' })
+await p1.wait((m) => m.type === 'left')
+const afterLeave = await p2.wait(
+  (m) => m.type === 'state' && !m.room.members.some((x) => x.id === p1j.you), 8000, true)
+assert.equal(afterLeave.room.members.length, 1, 'the leaver is gone')
+assert.equal(afterLeave.room.ownerId, p2j.you, 'new host keeps the room')
+console.log('· promote then leave works')
+
+// 19. the last person out ends the party
+p2.send({ type: 'leave' })
+await p2.wait((m) => m.type === 'left')
+await new Promise((r) => setTimeout(r, 400))
+assert.equal((await fetch(`http://localhost:${PORT}/api/party/${roomCode}`)).status, 404, 'empty party is gone')
+console.log('· last one out closes the party')
+
+// 20. only the host may promote
+const sneak = client('sneak')
+await sneak.ready
+sneak.send({ type: 'create', name: 'A', cap: 3 })
+const sj = await sneak.wait((m) => m.type === 'joined')
+const mate = client('mate')
+await mate.ready
+mate.send({ type: 'join', code: sj.room.code, name: 'B' })
+const mj = await mate.wait((m) => m.type === 'joined')
+const mr = await sneak.wait((m) => m.type === 'joinreq')
+sneak.send({ type: 'approve', id: mr.id, ok: true })
+await mate.wait((m) => m.type === 'state' && m.room.members.find((x) => x.id === mj.you)?.approved)
+mate.send({ type: 'promote', id: mj.you }) // a guest crowning themselves
+await new Promise((r) => setTimeout(r, 500))
+assert.equal(mate.last('state').room.ownerId, sj.you, 'a guest cannot take the crown')
+console.log('· only the host can hand over the crown')
+
 console.log('\nok — end to end passed')
 done(0)

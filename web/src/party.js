@@ -86,6 +86,13 @@ export function useParty() {
         onChat.current(m.msg)
         return
       }
+      if (m.type === 'left') { // we asked to go, and the server let us
+        lastParty.clear()
+        intent.current = null
+        inRoom.current = false
+        setRoom(null); setChat([]); setYouId(null)
+        return
+      }
       if (m.type === 'joinreq') return setJoinReqs((q) => [...q, m])
       if (m.type === 'countdown') return setCountdown(m.n)
       if (m.type === 'declined') {

@@ -70,11 +70,27 @@ node guest.js ABC Sara 8080   # joins party ABC and chats every few seconds
 | Control | Owner drives. Anyone can pause; the room sees who. Owner overrides. |
 | Entry | 3-letter code, host accepts or declines each person in chat. |
 | Owner leaves | Room pauses. After the grace period the crown passes to the longest-present member, still paused. |
+| Handing over | The host taps a member to make them host or remove them. Leaving as host asks who takes over first — a room with no host sits paused with nobody able to press play. The last person out ends the party. |
 | Avatars | Downscaled to 128px in the browser, posted as a data URL, written to the volume. No bucket, no multipart. |
 | Full screen | One control. Header, control bar and chat collapse out of the layout (0.5s, Apple spring curve) *and* the browser goes truly fullscreen, so the phone's tabs and address bar go too. Exit leaves both; so does Escape or the back gesture, via a `fullscreenchange` listener. Every message pops a glass card — reply inline to stay, tap the body to leave into chat. Tap the screen for the exit chip. |
 | Stall recovery | Chrome sometimes suspends a media load and never resumes — `readyState 0`, network "loading", no socket, film frozen. If the room is playing and the local clock hasn't moved for 4s, the player reloads and re-seeks to the room position. |
 | Refresh | The party code is remembered, so reloading walks straight back in under the same identity instead of dropping you at the lobby. |
 | Look | Liquid glass: deep blur, multi-layer inset shadows, an aqua `::before` reflection and a pointer-tracked glare, over dark green ambient light. Chat and controls are docked panels, not floating overlays. |
+
+## Brand assets
+
+`web/public/` is generated, not hand-edited. Rebuild it from the source artwork:
+
+```bash
+python tools/make-logo.py  "<banner with wordmark>.png"   # logo.png + mark.png
+python tools/make-icons.py "<square mark>.png"            # favicon.ico, app icons
+```
+
+Both keep the source art but strip its backdrop: the banner sits on black, so
+brightness becomes alpha; the square mark sits on grey, where brightness fails
+and *green excess* keys it instead. The header mark gets a hard alpha cut — the
+artwork's soft glow survives a gentle one and reads as a blurry smudge at 24px.
+The accent colour in `index.css` is sampled from the logo so the two match.
 
 ## Limits worth knowing
 

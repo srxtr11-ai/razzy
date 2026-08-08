@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { syncAction } from '../../lib.js'
-import { Check, Copy, Loader2, Maximize2, Minimize2, Pause, Play, Send, SkipForward, UserX, X } from 'lucide-react'
+import {
+  Check, Copy, Crown, Loader2, LogOut, Maximize2, Minimize2,
+  Pause, Play, Send, SkipForward, UserX, X,
+} from 'lucide-react'
 import { Avatar, Button, OwnerBadge, Signal, fmt, glare } from './ui.jsx'
 
 const CARD_MS = 4500
@@ -17,6 +20,7 @@ export default function Room({ party }) {
   const [blocked, setBlocked] = useState(false)
   const [unread, setUnread] = useState(0)
   const [urlDraft, setUrlDraft] = useState('')
+  const [leaving, setLeaving] = useState(false)
   const hideTimer = useRef(null)
   const cardTimers = useRef(new Map())
   const shell = useRef(null)
@@ -155,7 +159,7 @@ export default function Room({ party }) {
           className={`shrink-0 overflow-hidden transition-all duration-500 ${SPRING}
             ${focus ? 'h-0 opacity-0 -translate-y-3' : 'h-16 opacity-100 translate-y-0'}`}
         >
-          <TopBar room={room} youId={youId} isOwner={isOwner} send={send} />
+          <TopBar room={room} youId={youId} isOwner={isOwner} send={send} onLeave={() => setLeaving(true)} />
         </header>
 
         {/* video surface */}
@@ -274,6 +278,15 @@ export default function Room({ party }) {
         </div>
       </main>
 
+      {leaving && (
+        <LeaveSheet
+          room={room} youId={youId} isOwner={isOwner}
+          onCancel={() => setLeaving(false)}
+          onLeave={() => { setLeaving(false); send({ type: 'leave' }) }}
+          onHandOver={(id) => { send({ type: 'promote', id }); send({ type: 'leave' }); setLeaving(false) }}
+        />
+      )}
+
       {/* ================= docked chat ================= */}
       {/* min-w-0/min-h-0: a flex item defaults to min-size:auto, so the panel's own
           content would hold it open no matter what width we animate to. */}
@@ -290,6 +303,61 @@ export default function Room({ party }) {
 }
 
 /* ------------------------------------------------------------ pieces */
+
+/**
+ * Leaving. A host with other people still in the room has to pass the crown
+ * first — otherwise the party sits paused with nobody able to press play. So
+ * rather than refusing, we ask who should take over and do both in one go.
+ */
+function LeaveSheet({ room, youId, isOwner, onCancel, onLeave, onHandOver }) {
+  const others = room.members.filter((m) => m.approved && m.online && m.id !== youId)
+  const mustHandOver = isOwner && others.length > 0
+
+  return (
+    <div className="fixed inset-0 z-[70] grid place-items-center bg-black/60 backdrop-blur-md px-6" onClick={onCancel}>
+      <div className="liquid rounded-[2rem] p-6 w-full max-w-sm space-y-4 card-in" onClick={(e) => e.stopPropagation()}>
+        <div className="text-center space-y-1">
+          <h2 className="text-lg font-semibold">{mustHandOver ? 'Pick the next host' : 'Leave the party?'}</h2>
+          <p className="text-sm text-white/50">
+            {mustHandOver
+              ? "You're the host, so someone has to take over before you go."
+              : others.length
+                ? 'You can rejoin with the same code.'
+                : "You're the last one here — the party ends."}
+          </p>
+        </div>
+
+        {mustHandOver ? (
+          <div className="space-y-2 max-h-64 overflow-y-auto no-scrollbar">
+            {others.map((m) => (
+              <button
+                key={m.id}
+                onClick={() => onHandOver(m.id)}
+                className="press w-full flex items-center gap-3 rounded-2xl p-2 bg-white/6 hover:bg-white/12 text-left"
+              >
+                <Avatar m={m} size={34} />
+                <span className="flex-1 text-sm truncate">{m.name}</span>
+                <span className="flex items-center gap-1.5 text-xs font-semibold text-yellow-300">
+                  <Crown size={13} />
+                  Hand over &amp; leave
+                </span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <Button kind="danger" className="w-full flex items-center justify-center gap-2" onClick={onLeave}>
+            <LogOut size={16} />
+            Leave
+          </Button>
+        )}
+
+        <button onClick={onCancel} className="press w-full text-sm text-white/50 hover:text-white/80 py-1">
+          Stay
+        </button>
+      </div>
+    </div>
+  )
+}
 
 function ReadyCheck({ room, you, send }) {
   const notReady = room.members.filter((m) => m.approved && m.online && !m.ready)
@@ -350,36 +418,74 @@ function CodeChip({ code }) {
   )
 }
 
-function TopBar({ room, youId, isOwner, send }) {
+function TopBar({ room, youId, isOwner, send, onLeave }) {
+  const [menu, setMenu] = useState(null) // member id whose actions are open
+  const target = room.members.find((m) => m.id === menu)
+
   return (
-    <div className="h-full px-3 pt-3">
-      <div className="liquid glare rounded-full px-3 flex items-center gap-3 h-full" onPointerMove={glare.onPointerMove}>
+    <div className="h-full px-3 pt-3 relative">
+      {/* host's per-member actions; tap-driven so it works on a phone */}
+      {target && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setMenu(null)} />
+          <div className="absolute left-3 right-3 top-full mt-2 z-50 flex justify-center">
+            <div className="liquid rounded-2xl p-2 flex items-center gap-2 card-in">
+              <Avatar m={target} size={28} />
+              <span className="text-sm px-1 max-w-32 truncate">{target.name}</span>
+              <button
+                className="press flex items-center gap-1.5 rounded-xl px-3 h-9 text-sm font-semibold bg-yellow-400/15 text-yellow-300 hover:bg-yellow-400/25"
+                onClick={() => { send({ type: 'promote', id: target.id }); setMenu(null) }}
+              >
+                <Crown size={14} />
+                Make host
+              </button>
+              <button
+                className="press flex items-center gap-1.5 rounded-xl px-3 h-9 text-sm font-semibold bg-red-500/15 text-red-300 hover:bg-red-500/25"
+                onClick={() => { send({ type: 'kick', id: target.id }); setMenu(null) }}
+              >
+                <UserX size={14} />
+                Remove
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+
+      <div className="liquid glare rounded-full px-3 flex items-center gap-2.5 h-full" onPointerMove={glare.onPointerMove}>
+        {/* 0.76:1 mark — height-locked so it can't stretch */}
+        <img src="/mark.png" alt="" width={160} height={221} className="h-7 w-auto shrink-0 ml-1" />
         <CodeChip code={room.code} />
         {/* py-2 keeps the owner badge and signal bars inside the scroll box — a
             tight container clipped them in half. */}
         <div className="flex-1 flex items-center gap-2.5 overflow-x-auto overflow-y-hidden no-scrollbar py-2">
           {room.members.filter((m) => m.approved).map((m) => (
-            <div key={m.id} className="relative group shrink-0 pt-1 pl-1" title={m.name}>
+            <button
+              key={m.id}
+              className="relative shrink-0 pt-1 pl-1 press"
+              title={m.name}
+              onClick={() => isOwner && m.id !== youId && setMenu(menu === m.id ? null : m.id)}
+            >
               <Avatar m={m} size={32} dim={!m.online} />
               {m.id === room.ownerId && <OwnerBadge size={32} />}
               <span className="absolute -bottom-1 -right-1"><Signal ping={m.ping} online={m.online} /></span>
               {m.buffering && <span className="absolute inset-0 top-1 left-1 rounded-full ring-2 ring-yellow-400 animate-pulse" />}
               {m.focus && <span className="absolute top-1 -right-0.5 w-2 h-2 rounded-full bg-grass ring-2 ring-black/60" title="In focus mode" />}
-              {isOwner && m.id !== youId && (
-                <button
-                  onClick={() => send({ type: 'kick', id: m.id })}
-                  className="absolute inset-0 top-1 left-1 grid place-items-center rounded-full bg-red-500/85 opacity-0 group-hover:opacity-100 transition"
-                  aria-label={`Remove ${m.name}`}
-                >
-                  <UserX size={15} />
-                </button>
-              )}
-            </div>
+            </button>
           ))}
         </div>
+
         <span className="text-xs text-white/40 shrink-0">
           {room.members.filter((m) => m.approved).length}/{room.cap}
         </span>
+
+        <button
+          onClick={onLeave}
+          className="press shrink-0 grid place-items-center w-9 h-9 rounded-full bg-white/6 hover:bg-red-500/25 hover:text-red-300 text-white/60"
+          title="Leave the party"
+          aria-label="Leave the party"
+        >
+          <LogOut size={16} />
+        </button>
       </div>
     </div>
   )

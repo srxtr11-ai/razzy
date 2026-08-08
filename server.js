@@ -396,6 +396,33 @@ wss.on('connection', (ws) => {
       return pushState(room)
     }
 
+    if (m.type === 'promote' && isOwner()) {
+      const t = room.members.get(m.id)
+      if (!t || !t.approved || !t.online) return fail('They need to be in the party')
+      room.ownerId = t.id
+      room.ownerGoneAt = null
+      say(room, `${me.name} made ${t.name} the host`)
+      return pushState(room)
+    }
+
+    // Leaving. The host can't just walk out — the party would sit paused with
+    // nobody able to press play, so they have to hand the crown over first.
+    if (m.type === 'leave') {
+      const others = [...room.members.values()].filter((x) => x.approved && x.online && x.id !== me.id)
+      if (isOwner() && others.length) return fail('Make someone else the host before you leave')
+
+      const r = room
+      const gone = me
+      room = null
+      me = null
+      rmAvatar(gone.avatar)
+      r.members.delete(gone.id)
+      send(ws, { type: 'left' })
+      if (![...r.members.values()].some((x) => x.approved)) return destroy(r) // last one out
+      say(r, `${gone.name} left`)
+      return pushState(r)
+    }
+
     if (m.type === 'skip' && isOwner()) {
       const t = room.members.get(m.id)
       if (t) { t.skipped = true; say(room, `Skipped ${t.name}`) }

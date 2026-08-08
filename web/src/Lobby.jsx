@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react'
-import { Camera, LogIn, Minus, Plus, Sparkles } from 'lucide-react'
+import { Camera, Clapperboard, LogIn, Minus, Plus } from 'lucide-react'
 import { identity, remember, uploadAvatar } from './party.js'
 import { Avatar, Button, glare } from './ui.jsx'
 
@@ -39,9 +39,14 @@ export default function Lobby({ party }) {
       <Ambient />
       <div className="min-h-full grid place-items-center p-6">
         <div className="w-full max-w-sm rise">
-          <h1 className="text-5xl font-bold tracking-tight text-center mb-1">
-            Ra<span className="text-grass">zz</span>y
-          </h1>
+          {/* 3.39:1 lockup — fix the height and let width follow, so it never distorts */}
+          <img
+            src="/logo.png"
+            alt="Razzy"
+            width={640}
+            height={189}
+            className="block mx-auto h-20 sm:h-24 w-auto mb-3 drop-shadow-[0_0_34px_rgba(216,248,112,0.28)]"
+          />
           <p className="text-center text-white/40 text-sm mb-8">Same movie. Same second.</p>
 
           <div className="liquid glare rounded-[2rem] p-5 space-y-5" onPointerMove={glare.onPointerMove}>
@@ -115,7 +120,7 @@ export default function Lobby({ party }) {
                 disabled={!ready}
                 onClick={() => { save(); party.create(name.trim(), avatar, cap) }}
               >
-                <Sparkles size={16} />
+                <Clapperboard size={17} />
                 Create party
               </Button>
             </div>
