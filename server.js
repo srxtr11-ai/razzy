@@ -477,4 +477,4 @@ wss.on('connection', (ws) => {
 })
 
 const port = process.env.PORT || 3000
-app.listen({ port, host: '0.0.0.0' }).then(() => console.log(`watchparty on :${port}`))
+app.listen({ port, host: '0.0.0.0' }).then(() => console.log(`razzy on :${port}`))

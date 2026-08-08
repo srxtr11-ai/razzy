@@ -34,7 +34,7 @@ const done = async (code) => {
 }
 process.on('uncaughtException', (e) => { console.error(e); done(1) })
 
-await new Promise((r) => server.stdout.on('data', (b) => String(b).includes('watchparty on') && r()))
+await new Promise((r) => server.stdout.on('data', (b) => String(b).includes('razzy on') && r()))
 
 function client(label) {
   const ws = new WebSocket(`ws://localhost:${PORT}/ws`)

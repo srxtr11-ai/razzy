@@ -1,10 +1,17 @@
-# WatchParty
+# Razzy
 
 Everyone watches the same file at the same second, with chat over the top.
 
-Owner pastes a PixelDrain link, the app resolves it to the direct file
-(`/api/file/{id}`) and plays it in our own `<video>`. The server only moves
-timestamps and chat around — video bytes go host → viewer and never touch us.
+The owner pastes a PixelDrain link, the app resolves it to the direct file
+(`/api/file/{id}`) and plays it in our own `<video>`. The server holds the room
+clock and relays chat.
+
+Whether the video bytes touch this server depends on the host. Razzy probes
+each one: hosts that allow cross-origin playback are handed to the browser
+directly and cost us nothing. PixelDrain isn't one of them — it answers any
+request carrying `Sec-Fetch-Site: cross-site` with `403 hotlink_detected`, and
+browsers always send that header, so those files stream through `/stream/…`
+instead. Budget for the egress: one 180 MB episode × 5 viewers is ~900 MB.
 
 ## Run it
 

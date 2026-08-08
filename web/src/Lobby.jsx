@@ -39,8 +39,8 @@ export default function Lobby({ party }) {
       <Ambient />
       <div className="min-h-full grid place-items-center p-6">
         <div className="w-full max-w-sm rise">
-          <h1 className="text-4xl font-bold tracking-tight text-center mb-1">
-            Watch<span className="text-grass">Party</span>
+          <h1 className="text-5xl font-bold tracking-tight text-center mb-1">
+            Ra<span className="text-grass">zz</span>y
           </h1>
           <p className="text-center text-white/40 text-sm mb-8">Same movie. Same second.</p>
 

@@ -1,5 +1,5 @@
 {
-  "name": "watchparty",
+  "name": "razzy",
   "private": true,
   "type": "module",
   "engines": { "node": ">=22.5" },
