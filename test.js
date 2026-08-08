@@ -19,6 +19,8 @@ assert.equal(parsePixeldrain('https://pixeldrain.com/api/file/GKBvQx7Y'), 'GKBvQ
 assert.equal(parsePixeldrain('  https://pixeldrain.com/u/GKBvQx7Y  '), 'GKBvQx7Y')
 assert.equal(parsePixeldrain('https://example.com/movie.mp4'), null)
 assert.equal(parsePixeldrain(''), null)
+assert.equal(parsePixeldrain('nonsense'), null, 'a bare word is not a file id')
+assert.equal(parsePixeldrain('GKBvQx7Y'), null, 'the domain is required, not just the shape')
 assert.equal(resolveSource('https://pixeldrain.com/u/GKBvQx7Y').source, 'https://pixeldrain.com/api/file/GKBvQx7Y')
 assert.equal(resolveSource('https://pixeldrain.com/u/GKBvQx7Y').kind, 'file')
 assert.equal(resolveSource('https://cdn.example.com/a.mp4').source, 'https://cdn.example.com/a.mp4')

@@ -12,13 +12,16 @@ export function newCode(taken = new Set()) {
   throw new Error('no free party codes')
 }
 
-// https://pixeldrain.com/u/GKBvQx7Y -> GKBvQx7Y ; also accepts a bare id or a direct file url
+/**
+ * https://pixeldrain.com/u/GKBvQx7Y -> GKBvQx7Y
+ *
+ * A bare id used to be accepted too, but any 8-letter word matches that shape —
+ * "nonsense" was being resolved to a PixelDrain file. Requiring the domain keeps
+ * the guess out of it.
+ */
 export function parsePixeldrain(url) {
-  const s = String(url || '').trim()
-  const m = s.match(/pixeldrain\.com\/(?:u|api\/file)\/([A-Za-z0-9]+)/)
-  if (m) return m[1]
-  if (/^[A-Za-z0-9]{6,12}$/.test(s)) return s
-  return null
+  const m = String(url || '').trim().match(/pixeldrain\.com\/(?:u|api\/file)\/([A-Za-z0-9]+)/)
+  return m ? m[1] : null
 }
 
 export function pixeldrainFile(id) {

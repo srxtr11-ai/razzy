@@ -252,11 +252,25 @@ async function chooseSource(direct) {
 /* ------------------------------------------------------------------ http */
 
 const app = Fastify({ bodyLimit: 2 << 20 })
+
+/**
+ * The Android app is a WebView served from capacitor://localhost, so every call
+ * it makes to this server is cross-origin. Nothing here is user-specific or
+ * cookie-authenticated — a party code is the only key — so a blanket allow is
+ * the honest setting rather than a list of origins to keep in sync.
+ */
+app.addHook('onRequest', async (req, reply) => {
+  if (!req.url.startsWith('/api/')) return
+  reply.header('access-control-allow-origin', '*')
+  reply.header('access-control-allow-headers', 'content-type')
+  reply.header('access-control-allow-methods', 'GET,POST,OPTIONS')
+  if (req.method === 'OPTIONS') return reply.code(204).send()
+})
 app.register(fstatic, { root: path.join(HERE, 'web', 'dist') })
 app.register(fstatic, { root: AVATARS, prefix: '/avatars/', decorateReply: false })
 
 // Avatars arrive as a downscaled data URL — no multipart, no object storage.
-app.post('/api/avatar', async (req, reply) => {
+async function uploadAvatar(req, reply) {
   const m = /^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/=]+)$/.exec(req.body?.dataUrl || '')
   if (!m) return reply.code(400).send({ error: 'bad image' })
   const buf = Buffer.from(m[2], 'base64')
@@ -264,7 +278,8 @@ app.post('/api/avatar', async (req, reply) => {
   const name = `${randomUUID()}.${m[1] === 'jpeg' ? 'jpg' : m[1]}`
   await fs.promises.writeFile(path.join(AVATARS, name), buf)
   return { url: `/avatars/${name}` }
-})
+}
+app.post('/api/avatar', uploadAvatar)
 
 // Range-passthrough stream. Only URLs that are a live room's source are reachable,
 // so this can't be used as an open proxy.
@@ -306,6 +321,41 @@ app.get('/stream/:b64', async (req, reply) => {
   body.on('error', () => {}) // client hung up mid-chunk: normal, not a crash
   return reply.send(body)
 })
+
+/* ---------------------------------------------------------------- API v1 */
+// Small, stable surface for the Android app. Everything else it needs rides on
+// the same websocket the web client uses.
+
+app.get('/api/v1/health', async () => ({
+  ok: true,
+  service: 'razzy',
+  parties: rooms.size,
+  ws: '/ws',
+}))
+
+/** Does this code exist, and can another person still get in? */
+app.get('/api/v1/party/:code', async (req, reply) => {
+  const r = rooms.get(String(req.params.code).toUpperCase())
+  if (!r) return reply.code(404).send({ error: 'no such party' })
+  return {
+    code: r.code,
+    members: approved(r).length,
+    cap: r.cap,
+    full: approved(r).length >= r.cap,
+    phase: r.phase,
+    playing: r.phase === 'playing' && !r.paused,
+    sources: (r.sources || []).map((s) => ({ id: s.id, kind: s.kind, label: s.label })),
+  }
+})
+
+/** What would this link turn into? Lets the app validate before sending it. */
+app.get('/api/v1/resolve', async (req, reply) => {
+  const src = resolveSource(req.query?.url || '')
+  if (!src) return reply.code(400).send({ error: 'unsupported link' })
+  return { kind: src.kind, origin: src.origin }
+})
+
+app.post('/api/v1/avatar', uploadAvatar)
 
 app.get('/api/party/:code', async (req, reply) => {
   const r = rooms.get(String(req.params.code).toUpperCase())

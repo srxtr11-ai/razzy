@@ -1,0 +1,24 @@
+{
+  "appId": "app.razzy.party",
+  "appName": "Razzy",
+  "webDir": "dist",
+  "android": {
+    "allowMixedContent": false,
+    "backgroundColor": "#08090b"
+  },
+  "server": {
+    "androidScheme": "https",
+    "cleartext": false
+  },
+  "plugins": {
+    "Keyboard": {
+      "resize": "none",
+      "resizeOnFullScreen": false
+    },
+    "StatusBar": {
+      "style": "DARK",
+      "backgroundColor": "#08090b",
+      "overlaysWebView": true
+    }
+  }
+}

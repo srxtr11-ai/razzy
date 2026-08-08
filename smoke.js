@@ -380,5 +380,34 @@ qb.send({ type: 'skip', id: qaj.you })
 await new Promise((r) => setTimeout(r, 500))
 console.log('· owner can take co-host back')
 
+// 25. the API the Android app depends on
+const base = `http://localhost:${PORT}`
+const health = await fetch(`${base}/api/v1/health`)
+assert.equal(health.status, 200)
+assert.equal((await health.json()).ok, true, 'health responds')
+assert.equal(health.headers.get('access-control-allow-origin'), '*', 'CORS open for the app WebView')
+
+const pre = await fetch(`${base}/api/v1/party/${code}`)
+assert.equal(pre.status, 200)
+const info = await pre.json()
+assert.equal(info.code, code)
+assert.ok('full' in info && 'cap' in info, 'app can tell whether it can get in')
+assert.equal((await fetch(`${base}/api/v1/party/ZZZ`)).status, 404, 'unknown code is a 404')
+
+const res = await (await fetch(`${base}/api/v1/resolve?url=${encodeURIComponent('https://youtu.be/dQw4w9WgXcQ')}`)).json()
+assert.equal(res.kind, 'youtube', 'app can validate a link before sending it')
+assert.equal((await fetch(`${base}/api/v1/resolve?url=nonsense`)).status, 400, 'rubbish rejected')
+
+const pre2 = await fetch(`${base}/api/v1/avatar`, {
+  method: 'POST', headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ dataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==' }),
+})
+assert.equal(pre2.status, 200, 'app can upload an avatar')
+assert.ok((await pre2.json()).url.startsWith('/avatars/'))
+
+const opt = await fetch(`${base}/api/v1/health`, { method: 'OPTIONS' })
+assert.equal(opt.status, 204, 'preflight answered')
+console.log('· app API: health, party, resolve, avatar, CORS')
+
 console.log('\nok — end to end passed')
 done(0)
