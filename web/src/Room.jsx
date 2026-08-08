@@ -177,7 +177,7 @@ export default function Room({ party }) {
             />
           ) : (
             <div className="absolute inset-0 grid place-items-center text-white/40 text-sm px-6 text-center">
-              {isOwner ? 'Paste a PixelDrain link below to begin' : 'Waiting for the host to pick something…'}
+              {isOwner ? 'Paste a PixelDrain link under the chat to begin' : 'Waiting for the host to pick something…'}
             </div>
           )}
 
@@ -273,7 +273,6 @@ export default function Room({ party }) {
           <Controls
             room={room} you={you} isOwner={isOwner} send={send} duration={duration}
             onFocus={enterFullScreen} unread={unread}
-            urlDraft={urlDraft} setUrlDraft={setUrlDraft}
           />
         </div>
       </main>
@@ -296,7 +295,10 @@ export default function Room({ party }) {
             ? 'h-0 lg:h-auto lg:w-0 opacity-0'
             : 'h-[42%] lg:h-auto lg:w-[22rem] xl:w-[24rem] opacity-100'}`}
       >
-        <ChatPanel chat={chat} pending={pending} isOwner={isOwner} send={send} youId={youId} />
+        <ChatPanel
+          chat={chat} pending={pending} isOwner={isOwner} send={send} youId={youId}
+          urlDraft={urlDraft} setUrlDraft={setUrlDraft}
+        />
       </aside>
     </div>
   )
@@ -491,27 +493,12 @@ function TopBar({ room, youId, isOwner, send, onLeave }) {
   )
 }
 
-function Controls({ room, you, isOwner, send, duration, onFocus, unread, urlDraft, setUrlDraft }) {
+function Controls({ room, you, isOwner, send, duration, onFocus, unread }) {
   const typing = room.members.filter((m) => m.typing && m.id !== you?.id).map((m) => m.name)
   const pct = duration ? (Math.min(room.t, duration) / duration) * 100 : 0
 
   return (
-    <div className="p-3 space-y-2">
-      {isOwner && (
-        <form
-          className="liquid rounded-full h-12 flex items-center gap-2 pl-4 pr-2"
-          onSubmit={(e) => { e.preventDefault(); if (urlDraft.trim()) { send({ type: 'source', url: urlDraft.trim() }); setUrlDraft('') } }}
-        >
-          <input
-            value={urlDraft}
-            onChange={(e) => setUrlDraft(e.target.value)}
-            placeholder="https://pixeldrain.com/u/…"
-            className="flex-1 bg-transparent text-sm outline-none min-w-0"
-          />
-          <Button kind="ghost" type="submit">Load</Button>
-        </form>
-      )}
-
+    <div className="p-3">
       <div className="liquid glare rounded-full h-14 px-3 flex items-center gap-3" onPointerMove={glare.onPointerMove}>
         {room.phase === 'idle' ? (
           isOwner ? (
@@ -570,7 +557,7 @@ function Controls({ room, you, isOwner, send, duration, onFocus, unread, urlDraf
 }
 
 /** Docked panel — part of the layout, not floating over the film. */
-function ChatPanel({ chat, pending, isOwner, send, youId }) {
+function ChatPanel({ chat, pending, isOwner, send, youId, urlDraft, setUrlDraft }) {
   const [text, setText] = useState('')
   const list = useRef(null)
   useEffect(() => { list.current?.scrollTo({ top: 1e9, behavior: 'smooth' }) }, [chat])
@@ -644,6 +631,28 @@ function ChatPanel({ chat, pending, isOwner, send, youId }) {
             <Send size={16} />
           </Button>
         </form>
+
+        {/* Host's source box, parked under the chat: loading a link is a setup
+            step, not a playback control, so it doesn't belong on the player bar. */}
+        {isOwner && (
+          <form
+            className="px-2 pb-2 pt-0 flex gap-2 shrink-0"
+            onSubmit={(e) => {
+              e.preventDefault()
+              if (urlDraft.trim()) { send({ type: 'source', url: urlDraft.trim() }); setUrlDraft('') }
+            }}
+          >
+            <input
+              value={urlDraft}
+              onChange={(e) => setUrlDraft(e.target.value)}
+              placeholder="https://pixeldrain.com/u/…"
+              className="flex-1 bg-white/6 rounded-full px-4 h-10 text-sm outline-none focus:bg-white/12 transition min-w-0"
+            />
+            <Button kind="ghost" type="submit" className="h-10 px-4 shrink-0 bg-white/6">
+              Load
+            </Button>
+          </form>
+        )}
       </div>
     </div>
   )
