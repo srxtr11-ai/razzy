@@ -72,22 +72,66 @@ export function qualityLabel(nameOrUrl, fallback = 'Source') {
   return fallback
 }
 
-// Who is holding the room up: buffering, or more than `tol` seconds behind the room clock.
-// `skipped` members are ignored — the owner has chosen to leave them behind.
-export function laggards(members, roomTime, tol = 5) {
+/**
+ * Seconds of video a viewer must have downloaded *ahead of the playhead*.
+ *
+ * Buffer, not readyState: readyState climbs to "can play" the instant a single
+ * frame lands, so a viewer on a thin connection reads as healthy right up to
+ * the moment they stall again. Seconds-in-hand is the thing that actually
+ * predicts whether they can keep going.
+ *
+ * `low` and `resume` are deliberately far apart. Stopping the room at one level
+ * and restarting it at the same level guarantees oscillation — the room resumes
+ * the moment the buffer touches the line, drains it, and stops again a second
+ * later. Two levels make it a Schmitt trigger: fall below `low` to stop, climb
+ * past `resume` to go again.
+ */
+export const BUF = {
+  start: 4, // must be in hand before the countdown will run at all
+  low: 0.8, // below this you have genuinely run out of video
+  resume: 5, // and this much must be back before the room moves again
+  stray: 15, // drift this large means lost, not merely slow
+}
+
+/**
+ * Who is holding the room up. `need` is the buffer each viewer must have — the
+ * caller picks it, because the answer differs depending on what the room is
+ * doing (see BUF). `skipped` members are ignored: the host chose to leave them.
+ *
+ * A member who has never reported gets the benefit of the doubt rather than
+ * freezing the party for someone whose first tick is a fraction of a second away.
+ */
+export function holdingUp(members, roomTime, need = BUF.low, stray = BUF.stray) {
   return members.filter(
-    (m) => m.online && m.approved && !m.skipped && (m.buffering || roomTime - (m.t ?? roomTime) > tol)
+    (m) =>
+      m.online &&
+      m.approved &&
+      !m.skipped &&
+      ((m.buf ?? need) < need || roomTime - (m.t ?? roomTime) > stray)
   )
 }
 
-// Client-side drift correction. Small drift is corrected by playbackRate, big drift by seeking.
-export function syncAction(localTime, roomTime, tol = 1.5) {
+/**
+ * Client-side drift correction.
+ *
+ * Seeking is expensive in a way that isn't obvious: on a file streamed through
+ * us it abandons everything buffered ahead and opens a fresh range request, so
+ * a viewer who is nudged with a seek every time they slip a second is a viewer
+ * whose buffer never gets to grow. So seeking is the last resort — reserved for
+ * someone genuinely lost — and everything short of that is corrected by leaning
+ * on the playback rate, which costs nothing and is inaudible.
+ *
+ * The rate is proportional to the drift so it eases back in rather than
+ * stepping between two fixed speeds.
+ */
+export function syncAction(localTime, roomTime, tol = BUF.stray) {
   const drift = roomTime - localTime
-  if (Math.abs(drift) > 10) return { seek: roomTime, rate: 1 }
   if (Math.abs(drift) > tol) return { seek: roomTime, rate: 1 }
-  if (Math.abs(drift) > 0.25) return { seek: null, rate: drift > 0 ? 1.05 : 0.95 }
+  if (Math.abs(drift) > 0.3) return { seek: null, rate: clamp(1 + drift / 12, 0.9, 1.1) }
   return { seek: null, rate: 1 }
 }
+
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v))
 
 // Crown goes to the longest-present member still online.
 export function nextOwner(members, currentOwnerId) {

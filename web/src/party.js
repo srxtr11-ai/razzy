@@ -42,6 +42,8 @@ export function useParty() {
   const intent = useRef(null) // what to (re)send on open
   const inRoom = useRef(false) // have we ever actually got in? (ref: `open` never re-reads state)
   const onChat = useRef(() => {})
+  const onSfx = useRef(() => {})
+  const heard = useRef(0) // when the server last said anything at all
 
   const send = useCallback((msg) => {
     if (ws.current?.readyState === 1) ws.current.send(JSON.stringify(msg))
@@ -68,8 +70,10 @@ export function useParty() {
     }
 
     sock.onmessage = (e) => {
+      heard.current = Date.now()
       const m = JSON.parse(e.data)
       if (m.type === 'ping') return sock.send(JSON.stringify({ type: 'pong', ts: m.ts }))
+      if (m.type === 'sfx') return onSfx.current(m)
       if (m.type === 'joined') {
         setYouId(m.you)
         setRoom(m.room)
@@ -112,6 +116,25 @@ export function useParty() {
     return () => { const s = ws.current; ws.current = null; s?.close() }
   }, [open])
 
+  /**
+   * A socket can die without ever firing `close` — a laptop sleeping, wifi
+   * handing over to mobile data, anything that drops the connection without a
+   * FIN. The tab then sits there believing it is connected, forever. The server
+   * pings every 3s, so silence is the only reliable tell: ten seconds of it and
+   * the connection is dead whatever readyState claims.
+   */
+  useEffect(() => {
+    const id = setInterval(() => {
+      const s = ws.current
+      if (!s || !heard.current) return
+      if (s.readyState === 1 && Date.now() - heard.current > 10_000) {
+        heard.current = 0
+        s.close() // onclose reconnects and walks us back into the same seat
+      }
+    }, 3000)
+    return () => clearInterval(id)
+  }, [])
+
   useEffect(() => {
     if (countdown === null) return
     const t = setTimeout(() => setCountdown(null), countdown === 0 ? 700 : 1000)
@@ -147,6 +170,7 @@ export function useParty() {
     room, you, youId, isOwner, chat, error, setError, countdown, connected, declined,
     joinReqs, clearJoinReq: (id) => setJoinReqs((q) => q.filter((r) => r.id !== id)),
     onChatMessage: (fn) => { onChat.current = fn },
+    onSound: (fn) => { onSfx.current = fn },
     send, create, join, leave,
   }
 }

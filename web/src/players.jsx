@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react'
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
 
 /**
  * Two very different playback engines behind one small interface, so the sync
@@ -9,7 +9,8 @@ import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react'
  *   seek(t)
  *   time()              seconds
  *   duration()          seconds, 0 until known
- *   ready()             0..4, mirroring HTMLMediaElement.readyState
+ *   buffered()          seconds downloaded *ahead of the playhead*
+ *   loading()           is data still arriving? (a slow player, not a dead one)
  *   isPaused()
  *   reload()            last resort for a wedged player
  *
@@ -36,6 +37,24 @@ export const FilePlayer = forwardRef(function FilePlayer({ src, onDuration }, re
     time: () => el.current?.currentTime ?? 0,
     duration: () => (isFinite(el.current?.duration) ? el.current.duration : 0),
     ready: () => el.current?.readyState ?? 0,
+    /**
+     * How many seconds are already downloaded in front of us. This is the
+     * number the whole sync system runs on: readyState says "I have a frame",
+     * which is true right up to the instant the video stalls again.
+     */
+    buffered: () => {
+      const v = el.current
+      if (!v) return 0
+      const t = v.currentTime
+      for (let i = 0; i < v.buffered.length; i++) {
+        // 0.25s of slack: the range boundary rarely lands exactly on the playhead
+        if (v.buffered.start(i) <= t + 0.25 && v.buffered.end(i) > t) return v.buffered.end(i) - t
+      }
+      return 0
+    },
+    // NETWORK_LOADING. Tells "slow" apart from "wedged", which look identical
+    // from the outside and want opposite treatment.
+    loading: () => el.current?.networkState === 2,
     isPaused: () => el.current?.paused ?? true,
     rate: (r) => { if (el.current) el.current.playbackRate = r },
     reload: () => el.current?.load(),
@@ -71,22 +90,57 @@ function loadApi() {
 
 const YT_STATE = { UNSTARTED: -1, ENDED: 0, PLAYING: 1, PAUSED: 2, BUFFERING: 3, CUED: 5 }
 
+// "However much the room needs" — YouTube's buffer isn't measurable, see below.
+const PLENTY = 999
+
+/** YouTube's internal level names, in the terms people actually use. */
+export const YT_LABEL = {
+  highres: '4320p', hd2160: '2160p', hd1440: '1440p', hd1080: '1080p', hd720: '720p',
+  large: '480p', medium: '360p', small: '240p', tiny: '144p', auto: 'Auto',
+}
+
 export const YouTubePlayer = forwardRef(function YouTubePlayer({ videoId, onDuration }, ref) {
   const host = useRef(null)
   const yt = useRef(null)
   const state = useRef(YT_STATE.UNSTARTED)
   const bufferingSince = useRef(0)
+  const resumeAt = useRef(0)
+  /**
+   * Whether to hand the viewer YouTube's own control bar.
+   *
+   * This is the only way a viewer can change YouTube's quality. Everything the
+   * page can ask for is ignored: setPlaybackQuality() has been a no-op for
+   * years, and the undocumented `vq` player var and setPlaybackQualityRange()
+   * were both measured doing nothing here — the embed kept serving 480p when
+   * asked for 1080p *and* when asked for 144p, at a 1016x756 player. YouTube's
+   * own settings menu is the one place the choice sticks, so that is what gets
+   * offered rather than a row of buttons that quietly do nothing.
+   *
+   * Changing it rebuilds the player, so it lives in state.
+   */
+  const [ownControls, setOwnControls] = useState(false)
 
   useEffect(() => {
     let dead = false
     let player
+    // YT.Player *replaces* the element it is handed with the iframe, so the node
+    // is gone the moment the player exists. Building a second player on the same
+    // ref therefore targets a detached div: it never becomes ready, buffered()
+    // reports nothing forever, and the room stops for a viewer whose player will
+    // never come back. Hence a fresh throwaway child on every build.
+    const mount = document.createElement('div')
+    mount.style.width = '100%'
+    mount.style.height = '100%'
+    host.current?.appendChild(mount)
+
     loadApi().then((YT) => {
       if (dead || !host.current) return
-      player = new YT.Player(host.current, {
+      player = new YT.Player(mount, {
         videoId,
         playerVars: {
-          controls: 0, disablekb: 1, modestbranding: 1, rel: 0,
+          controls: ownControls ? 1 : 0, disablekb: 1, modestbranding: 1, rel: 0,
           playsinline: 1, iv_load_policy: 3, fs: 0,
+          ...(resumeAt.current > 1 ? { start: Math.floor(resumeAt.current) } : {}),
         },
         events: {
           onReady: (e) => { yt.current = e.target; onDuration?.(e.target.getDuration()) },
@@ -99,8 +153,14 @@ export const YouTubePlayer = forwardRef(function YouTubePlayer({ videoId, onDura
         },
       })
     })
-    return () => { dead = true; try { player?.destroy() } catch {} yt.current = null }
-  }, [videoId]) // eslint-disable-line react-hooks/exhaustive-deps
+    return () => {
+      dead = true
+      try { player?.destroy() } catch {}
+      yt.current = null
+      state.current = YT_STATE.UNSTARTED // or the next player inherits a stale one
+      if (host.current) host.current.innerHTML = '' // whatever destroy() left
+    }
+  }, [videoId, ownControls]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useImperativeHandle(ref, () => ({
     // No promise from playVideo(), so watch the state instead: if it hasn't
@@ -150,21 +210,52 @@ export const YouTubePlayer = forwardRef(function YouTubePlayer({ videoId, onDura
       if (state.current === YT_STATE.BUFFERING) return Date.now() - bufferingSince.current > 1500 ? 1 : 4
       return 4
     },
+    /**
+     * There's no buffered TimeRanges here, only "how much of the video is
+     * loaded" as a fraction, so the seconds in hand have to be derived. Sitting
+     * in BUFFERING for real overrides it: at that point the number is a
+     * leftover from before the stall, whatever it says.
+     */
+    /**
+     * YouTube downloads only while it is playing, and only ever reports a coarse
+     * "fraction loaded". Asking it for seconds-in-hand while it is paused or not
+     * yet started is a deadlock by construction: it cannot fill, so a room that
+     * waits for the number to rise waits forever. That bit twice — once holding
+     * the countdown for a player that only buffers *after* the countdown, and
+     * once leaving a room stopped for a viewer whose player was paused
+     * precisely because the room had stopped.
+     *
+     * So the only state here that honestly means "out of video" is a stall that
+     * persists. YouTube does its own buffering the rest of the time, and a
+     * player that is genuinely broken still gets caught by the clock-drift
+     * backstop in holdingUp().
+     */
+    buffered: () => {
+      if (state.current !== YT_STATE.BUFFERING) return PLENTY
+      return Date.now() - bufferingSince.current > 1500 ? 0 : PLENTY
+    },
+    loading: () => state.current === YT_STATE.BUFFERING,
     isPaused: () => state.current !== YT_STATE.PLAYING && state.current !== YT_STATE.BUFFERING,
     rate: (r) => { try { yt.current?.setPlaybackRate(r) } catch {} },
-    qualities: () => {
-      try { return yt.current?.getAvailableQualityLevels?.() ?? [] } catch { return [] }
+    /** What is genuinely on screen — YouTube has the final say, so ask it. */
+    quality: () => {
+      try { return yt.current?.getPlaybackQuality?.() || 'auto' } catch { return 'auto' }
     },
-    // YouTube deprecated this: it accepts the call and then decides for itself
-    // based on bandwidth. Offered as a hint, labelled as one in the UI.
-    setQuality: (q) => { try { yt.current?.setPlaybackQuality?.(q) } catch {} },
+    ownControls: () => ownControls,
+    /** Hand the viewer YouTube's own gear menu, resuming where they were. */
+    setOwnControls: (on) => {
+      try { resumeAt.current = yt.current?.getCurrentTime?.() || 0 } catch {}
+      setOwnControls(!!on)
+    },
     reload: () => { const p = yt.current; if (p) { p.seekTo(p.getCurrentTime(), true); p.playVideo() } },
-  }), [])
+  }), [ownControls])
 
   return (
     <div className="absolute inset-0 bg-black">
-      {/* the API replaces this node with the iframe */}
-      <div ref={host} className="w-full h-full pointer-events-none" />
+      {/* Container only — React must not own the node the API swallows. Taps go
+          through to YouTube only when the viewer has asked for its controls;
+          otherwise the film is Razzy's to drive. */}
+      <div ref={host} className={`w-full h-full ${ownControls ? '' : 'pointer-events-none'}`} />
     </div>
   )
 })

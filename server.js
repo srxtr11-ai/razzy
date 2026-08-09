@@ -7,7 +7,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { Readable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
-import { newCode, parsePixeldrain, qualityLabel, resolveSource, laggards, nextOwner } from './lib.js'
+import { BUF, newCode, parsePixeldrain, qualityLabel, resolveSource, holdingUp, nextOwner } from './lib.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const DATA = process.env.DATA_DIR || path.join(HERE, 'data') // Railway volume mounts here
@@ -16,9 +16,18 @@ fs.mkdirSync(AVATARS, { recursive: true })
 
 const OWNER_GRACE_MS = Number(process.env.OWNER_GRACE_MS) || 60_000 // crown passes after this
 const ROOM_TTL_MS = 10 * 60_000 // empty room dies after this
+// Two different clocks, because they answer different questions. A seat stops
+// counting against the cap quickly — a reconnect takes seconds, and a room that
+// reports "full" with nobody in it is unusable. Being *forgotten* takes longer,
+// so someone who comes back inside a few minutes still walks into their own
+// identity instead of queueing for approval again.
+const SEAT_HOLD_MS = Number(process.env.SEAT_HOLD_MS) || 90_000
+const MEMBER_TTL_MS = Number(process.env.MEMBER_TTL_MS) || 3 * 60_000
+const DEAD_SOCKET_MS = 15_000 // no pong for this long: the connection is a corpse
 const MAX_MSG = 500
 const CHAT_KEEP = 200
 const TYPING_TTL_MS = 4000 // typing flag self-expires; clients don't reliably say 'stopped'
+const SFX_COOLDOWN_MS = 1500 // a soundboard without one is a weapon
 
 /* ---------------------------------------------------------------- storage */
 
@@ -31,10 +40,21 @@ const dropStmt = db.prepare(`DELETE FROM rooms WHERE code = ?`)
 /** Everything except live sockets. Members come back as offline after a redeploy. */
 const snapshot = (r) => ({
   code: r.code, cap: r.cap, ownerId: r.ownerId, sources: r.sources || [], phase: r.phase, t: r.t, paused: r.paused,
-  members: [...r.members.values()].map(({ ws, ...m }) => ({ ...m, online: false, ready: false, buffering: false })),
+  members: [...r.members.values()].map(({ ws, ...m }) => ({ ...m, online: false, ready: false, buf: 0 })),
 })
 
-const persist = (r) => saveStmt.run(r.code, JSON.stringify(snapshot(r)), Date.now())
+// Rooms change every second; writing the database every second per room is a
+// synchronous disk write in the middle of the clock tick for no benefit. The
+// copy only has to be good enough to survive a redeploy.
+const dirty = new Set()
+const persist = (r) => dirty.add(r.code)
+setInterval(() => {
+  for (const code of dirty) {
+    const r = rooms.get(code)
+    if (r) saveStmt.run(code, JSON.stringify(snapshot(r)), Date.now())
+  }
+  dirty.clear()
+}, 5000)
 
 /* ------------------------------------------------------------------ rooms */
 
@@ -47,7 +67,11 @@ for (const row of db.prepare(`SELECT data FROM rooms`).all()) {
     ...s,
     paused: true,
     phase: s.phase === 'playing' ? 'playing' : 'idle',
-    members: new Map(s.members.map((m) => [m.id, { ...m, ws: null }])),
+    // Everyone is offline the instant we come back up. Start their grace window
+    // now, so the ones who reconnect keep their seat and the ones who don't
+    // stop occupying it — a restored room used to come back permanently "full"
+    // of people who were never coming back.
+    members: new Map(s.members.map((m) => [m.id, { ...m, ws: null, online: false, leftAt: Date.now() }])),
     chat: [],
     ownerGoneAt: Date.now(),
     emptyAt: Date.now(),
@@ -55,16 +79,35 @@ for (const row of db.prepare(`SELECT data FROM rooms`).all()) {
 }
 
 const online = (r) => [...r.members.values()].filter((m) => m.online)
-const approved = (r) => [...r.members.values()].filter((m) => m.approved)
+
+/**
+ * Seats in use. A seat belongs to whoever is here now plus anyone who dropped
+ * recently and is probably reconnecting — counting people who left an hour ago
+ * is what made rooms report "full" with nobody in them.
+ */
+const seats = (r) =>
+  [...r.members.values()].filter(
+    (m) => m.approved && (m.online || (m.leftAt && Date.now() - m.leftAt < SEAT_HOLD_MS))
+  ).length
+
+/** How much buffer everyone needs right now, given what the room is doing. */
+function needNow(r) {
+  if (r.phase === 'ready' || r.phase === 'countdown') return BUF.start
+  if (r.phase !== 'playing') return 0
+  // While already stopped for someone, demand the higher figure — see BUF.
+  return r.paused && r.pausedBy === null ? BUF.resume : BUF.low
+}
 
 function publicRoom(r) {
-  const waiting = laggards([...r.members.values()], r.t).map((m) => m.id)
+  const waiting = holdingUp([...r.members.values()], r.t, needNow(r)).map((m) => m.id)
   return {
     code: r.code, cap: r.cap, ownerId: r.ownerId, sources: r.sources || [],
     phase: r.phase, t: r.t, paused: r.paused, pausedBy: r.pausedBy || null, waiting,
     members: [...r.members.values()].map((m) => ({
       id: m.id, name: m.name, avatar: m.avatar, approved: m.approved, online: m.online,
-      ready: !!m.ready, buffering: !!m.buffering, paused: !!m.paused, focus: !!m.focus,
+      ready: !!m.ready, paused: !!m.paused, focus: !!m.focus,
+      // Seconds in hand, and the flag the UI draws from it.
+      buf: m.buf ?? null, buffering: m.online && (m.buf ?? BUF.low) < BUF.low,
       coHost: !!m.coHost,
       // Typing expires on its own. A client that goes to focus mode, closes the
       // tab or just stops mid-word never sends "stopped", so a sticky flag left
@@ -113,6 +156,14 @@ function rmAvatar(url) {
 setInterval(() => {
   const now = Date.now()
   for (const r of rooms.values()) {
+    // Let go of seats belonging to people who are not coming back.
+    for (const m of r.members.values()) {
+      if (m.online || !m.leftAt || now - m.leftAt < MEMBER_TTL_MS) continue
+      if (m.id === r.ownerId && !nextOwner([...r.members.values()], r.ownerId)) continue
+      rmAvatar(m.avatar)
+      r.members.delete(m.id)
+    }
+
     if (!online(r).length) {
       if (now - (r.emptyAt ||= now) > ROOM_TTL_MS) destroy(r)
       continue
@@ -121,25 +172,25 @@ setInterval(() => {
 
     if (r.phase === 'playing' && !r.paused) {
       r.t += (now - r.lastTick) / 1000
-      const behind = laggards([...r.members.values()], r.t)
-      // Hysteresis: a single slow tick is normal streaming jitter. Only stop the
-      // room if someone is still behind on the next tick, or the chat fills with
-      // pause/resume spam every few seconds.
-      if (behind.length) r.behindTicks = (r.behindTicks || 0) + 1
-      else r.behindTicks = 0
-
-      if (r.behindTicks >= 2) {
+      // Every stream dips for a moment. Stopping the film for a dip is worse
+      // than the dip, so someone has to be genuinely out of video for a few
+      // seconds running before the room waits for them.
+      r.behindTicks = holdingUp([...r.members.values()], r.t, BUF.low).length
+        ? (r.behindTicks || 0) + 1
+        : 0
+      if (r.behindTicks >= 3) {
         r.paused = true
         r.pausedBy = null
-        r.announcedWait = behind.map((m) => m.name).join(', ')
-        say(r, `Waiting for ${r.announcedWait}…`)
+        r.behindTicks = 0
       }
     } else if (r.phase === 'playing' && r.paused && r.pausedBy === null) {
-      // auto-paused: resume the moment everyone has caught up
-      if (!laggards([...r.members.values()], r.t).length) {
+      // Auto-paused. Release only once everyone has a real cushion again, not
+      // the moment they scrape past the line we stopped at. Nothing is said in
+      // chat about any of this — the room already shows who it is waiting for,
+      // and a line per transition turned a shaky connection into a wall of text.
+      if (!holdingUp([...r.members.values()], r.t, BUF.resume).length) {
         r.paused = false
         r.behindTicks = 0
-        if (r.announcedWait) { say(r, 'Everyone caught up — resuming'); r.announcedWait = null }
       }
     }
     r.lastTick = now
@@ -168,28 +219,46 @@ setInterval(() => {
 
 /* -------------------------------------------------------------- countdown */
 
+/**
+ * Ready check -> everyone has video in hand -> 3, 2, 1.
+ *
+ * The wait for buffers is the whole point: starting the film the instant the
+ * last person taps Ready means five players all begin with nothing downloaded,
+ * all starve at once, and the room spends the first minute stuttering. Waiting
+ * once here is what buys a clean start.
+ */
 function startCountdown(r) {
-  r.phase = 'countdown'
+  if (r.countingDown) return
+  r.countingDown = true
   let n = 3
-  let patience = 20 // seconds of buffering we'll tolerate before starting anyway
-  pushState(r)
+  let patience = 30 // seconds of buffering we'll tolerate before starting anyway
+
   const tick = () => {
-    // A straggler buffering mid-countdown restarts the wait rather than starting without them —
-    // but never forever, or one dead connection freezes the party permanently.
-    if (patience-- > 0 && laggards([...r.members.values()], r.t).length) {
+    if (!rooms.has(r.code) || r.phase === 'idle') { r.countingDown = false; return }
+
+    if (patience-- > 0 && holdingUp([...r.members.values()], r.t, BUF.start).length) {
+      // Hold, and *come back*. This used to return without rescheduling, which
+      // stranded the party on "Starting…" with nothing left to wake it up.
+      // Sitting in 'ready' keeps the card on screen, and it already names who
+      // everyone is waiting for.
       r.phase = 'ready'
-      say(r, 'Still buffering — hold on')
-      return pushState(r)
+      pushState(r)
+      return setTimeout(tick, 1000)
     }
+
+    r.phase = 'countdown'
     broadcast(r, { type: 'countdown', n })
     if (n === 0) {
       r.phase = 'playing'
       r.paused = false
       r.pausedBy = null
+      r.behindTicks = 0
       r.lastTick = Date.now()
+      r.countingDown = false
       return pushState(r)
     }
     n--
+    pushState(r)
     setTimeout(tick, 1000)
   }
   tick()
@@ -314,7 +383,10 @@ app.get('/stream/:b64', async (req, reply) => {
     const v = upstream.headers.get(h)
     if (v) reply.header(h, v)
   }
-  reply.header('cache-control', 'no-store')
+  // The bytes behind a file id never change, so let the browser keep the ranges
+  // it has already pulled. Without this, every pause, every seek backwards and
+  // every re-buffer dragged the same bytes through this server again.
+  reply.header('cache-control', 'public, max-age=86400')
   if (!upstream.body) return reply.send(null)
 
   const body = Readable.fromWeb(upstream.body)
@@ -339,9 +411,9 @@ app.get('/api/v1/party/:code', async (req, reply) => {
   if (!r) return reply.code(404).send({ error: 'no such party' })
   return {
     code: r.code,
-    members: approved(r).length,
+    members: seats(r),
     cap: r.cap,
-    full: approved(r).length >= r.cap,
+    full: seats(r) >= r.cap,
     phase: r.phase,
     playing: r.phase === 'playing' && !r.paused,
     sources: (r.sources || []).map((s) => ({ id: s.id, kind: s.kind, label: s.label })),
@@ -360,11 +432,15 @@ app.post('/api/v1/avatar', uploadAvatar)
 app.get('/api/party/:code', async (req, reply) => {
   const r = rooms.get(String(req.params.code).toUpperCase())
   if (!r) return reply.code(404).send({ error: 'no such party' })
-  return { code: r.code, full: approved(r).length >= r.cap, phase: r.phase }
+  return { code: r.code, full: seats(r) >= r.cap, phase: r.phase }
 })
 
-// SPA fallback
-app.setNotFoundHandler((req, reply) => reply.sendFile('index.html'))
+// SPA fallback — except under /api, where handing a client index.html for a
+// typo'd endpoint turns a clear 404 into "Unexpected token '<'".
+app.setNotFoundHandler((req, reply) => {
+  if (req.url.startsWith('/api/')) return reply.code(404).send({ error: 'no such endpoint' })
+  reply.sendFile('index.html')
+})
 
 /* -------------------------------------------------------------------- ws */
 
@@ -386,10 +462,16 @@ wss.on('connection', (ws) => {
   const isHost = () => isOwner() || (room && me && !!me.coHost && me.approved)
 
   const attach = (r, member) => {
+    const stale = member.ws
     room = r
     me = member
     member.ws = ws
     member.online = true
+    member.leftAt = null
+    member.lastPong = Date.now()
+    // Two live sockets for one person (a reconnect, a second tab) — drop the
+    // older one rather than leaving it to time out and report us offline.
+    if (stale && stale !== ws) { try { stale.close() } catch {} }
     send(ws, { type: 'joined', you: member.id, room: publicRoom(r), chat: r.chat })
   }
 
@@ -398,7 +480,11 @@ wss.on('connection', (ws) => {
     try { m = JSON.parse(raw) } catch { return }
 
     /* --- lobby ------------------------------------------------------- */
-    if (m.type === 'pong') { if (me) me.ping = Date.now() - m.ts; return } // also fires before joining
+    // also fires before joining
+    if (m.type === 'pong') {
+      if (me) { me.ping = Date.now() - m.ts; me.lastPong = Date.now() }
+      return
+    }
 
     if (m.type === 'create') {
       const cap = Math.min(50, Math.max(2, Number(m.cap) || 6))
@@ -423,7 +509,7 @@ wss.on('connection', (ws) => {
       const known = m.id && r.members.get(m.id)
       if (known) { attach(r, known); return pushState(r) } // rejoin keeps your seat
 
-      if (approved(r).length >= r.cap) return fail('Party is full')
+      if (seats(r) >= r.cap) return fail('Party is full')
       const id = m.id || randomUUID()
       const member = {
         id, name: String(m.name || 'Guest').slice(0, 24), avatar: m.avatar || null,
@@ -530,7 +616,11 @@ wss.on('connection', (ws) => {
           r.phase = 'idle'
           r.t = 0
           r.paused = true
-          for (const x of r.members.values()) { x.ready = false; x.skipped = false; x.t = 0 }
+          r.pausedBy = null
+          r.behindTicks = 0
+          r.countingDown = false
+          r.seekedAt = 0
+          for (const x of r.members.values()) { x.ready = false; x.skipped = false; x.t = 0; x.buf = null }
           say(r, src.kind === 'youtube'
             ? 'New video loaded from YouTube'
             : proxied ? 'New video loaded (streaming through the server)' : 'New video loaded')
@@ -593,20 +683,44 @@ wss.on('connection', (ws) => {
     if (m.type === 'seek' && isHost()) {
       room.t = Math.max(0, Number(m.t) || 0)
       room.lastTick = Date.now()
+      room.seekedAt = Date.now() // the owner's player hasn't caught up yet
       return pushState(room)
     }
 
     // Owner's player is the truth; everyone else just reports where they are.
     if (m.type === 'tick') {
-      me.t = Number(m.t) || 0
-      me.buffering = !!m.buffering
+      const t = Math.max(0, Number(m.t) || 0)
+      me.t = t
+      me.buf = Math.max(0, Number(m.buf) || 0)
       me.paused = !!m.paused
       me.focus = !!m.focus
       if (isOwner() && !room.paused && room.phase === 'playing') {
-        room.t = me.t
-        room.lastTick = Date.now()
+        // Forwards only, and never straight after a seek. A player that has just
+        // been reloaded or swapped for another quality reads 0 for a moment, and
+        // taking that literally threw the entire room back to the start of the
+        // film. If the owner really did jump backwards they used the scrubber,
+        // which sets the clock itself.
+        const fresh = Date.now() - (room.seekedAt || 0) > 1500
+        if (fresh && t > room.t - 2) {
+          room.t = t
+          room.lastTick = Date.now()
+        }
       }
       return
+    }
+
+    // Soundboard: one person taps, everyone hears it.
+    if (m.type === 'sfx') {
+      if (!me.approved) return
+      const now = Date.now()
+      if (now - (me.sfxAt || 0) < SFX_COOLDOWN_MS) return
+      me.sfxAt = now
+      return broadcast(room, {
+        type: 'sfx',
+        id: String(m.id || '').slice(0, 40),
+        from: me.id,
+        name: me.name,
+      })
     }
 
     if (m.type === 'typing') { me.typingAt = m.on ? Date.now() : 0; return }
@@ -623,16 +737,27 @@ wss.on('connection', (ws) => {
     }
   })
 
-  const ping = setInterval(() => send(ws, { type: 'ping', ts: Date.now() }), 3000)
+  // A phone that walks out of wifi leaves a half-open socket: no close event
+  // ever arrives, so the member stays "online" forever and the room sits there
+  // waiting for a ghost to finish buffering. Silence is the only tell.
+  const ping = setInterval(() => {
+    if (me && Date.now() - (me.lastPong || 0) > DEAD_SOCKET_MS) return ws.terminate()
+    send(ws, { type: 'ping', ts: Date.now() })
+  }, 3000)
 
   ws.on('close', () => {
     clearInterval(ping)
     if (!room || !me) return
+    // A reconnecting client usually lands its new socket *before* the old one's
+    // close event arrives. Without this check the corpse of the old connection
+    // immediately marks the live one offline.
+    if (me.ws !== ws) return
     me.online = false
     me.ws = null
     me.ready = false
-    me.buffering = false
+    me.buf = null
     me.typingAt = 0
+    me.leftAt = Date.now()
     if (!me.approved) room.members.delete(me.id) // never approved, never existed
     pushState(room)
   })

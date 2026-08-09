@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
-import { syncAction } from '../../../lib.js'
+import { BUF, syncAction } from '../../../lib.js'
 import {
-  Check, Crown, Loader2, LogOut, Maximize2, MessageCircle, Minimize2, Pause, Play,
-  Send, Settings, Shield, SkipForward, UserX, Volume2, X,
+  Check, Crown, Gamepad2, Loader2, LogOut, Maximize2, MessageCircle, Minimize2, Pause, Play,
+  Send, Settings, Shield, SkipForward, UserX, Volume2, X, Zap,
 } from 'lucide-react'
-import { api } from '../api.js'
-import { FilePlayer, YouTubePlayer } from '../components/players.jsx'
+import { api, immersive } from '../api.js'
+import { FilePlayer, YouTubePlayer, YT_LABEL } from '../components/players.jsx'
+import { SOUNDS, playSound } from '../sfx.js'
 import { Avatar, Button, CoHostBadge, OwnerBadge, Signal, fmt, useKeyboardInset, useLayout } from '../components/ui.jsx'
 
 const CARD_MS = 4500
@@ -28,6 +29,8 @@ export default function Room({ party }) {
   const [cards, setCards] = useState([])
   const [menu, setMenu] = useState(null)
   const [leaving, setLeaving] = useState(false)
+  const [gameOpen, setGameOpen] = useState(false)
+  const [sfxToast, setSfxToast] = useState(null)
   const hideTimer = useRef(null)
   const cardTimers = useRef(new Map())
 
@@ -36,6 +39,9 @@ export default function Room({ party }) {
   const pending = room.members.filter((m) => !m.approved)
   const members = room.members.filter((m) => m.approved)
   const waitingNames = room.waiting.map((id) => room.members.find((m) => m.id === id)?.name).filter(Boolean)
+  // Nothing can happen until the host is back — nobody else can press play.
+  const hostMember = room.members.find((m) => m.id === room.ownerId)
+  const hostAway = !!hostMember && !hostMember.online && !isOwner
 
   /**
    * Where the chat goes, decided once:
@@ -53,7 +59,15 @@ export default function Room({ party }) {
     if (!p || !activeSrc) return
     if (room.phase !== 'playing' || room.paused) {
       if (!p.isPaused()) p.pause()
-      if (Math.abs(p.time() - room.t) > 1.5) p.seek(room.t)
+      // Don't drag someone forward while the room is stopped *for* them — a seek
+      // throws away the buffer this pause exists to let them build. But only for
+      // small corrections: a big gap means being in the wrong place entirely
+      // (someone who just walked into a film already well under way), and
+      // suppressing *that* seek deadlocks the room — they never move, so they
+      // never stop holding it up, so it never resumes.
+      const gap = Math.abs(p.time() - room.t)
+      const heldForMe = room.pausedBy === null && room.waiting.includes(youId)
+      if (gap > BUF.stray || (!heldForMe && gap > 3)) p.seek(room.t)
       return
     }
     const { seek, rate } = syncAction(p.time(), room.t)
@@ -64,31 +78,56 @@ export default function Room({ party }) {
         .then(() => setBlocked(false))
         .catch(() => p.playMuted().then(() => setBlocked('sound')).catch(() => setBlocked('play')))
     }
-  }, [room.phase, room.paused, room.t, activeSrc?.id])
+  }, [room.phase, room.paused, room.t, room.pausedBy, activeSrc?.id, youId])
+
+  /**
+   * What the ticker needs to read, in a ref rather than a dependency array.
+   *
+   * `room.t` used to be a dependency, and the server pushes room state every
+   * second — so this interval was destroyed and recreated every second, and a
+   * 1000ms timer reset every ~1000ms almost never fires. No position and no
+   * buffer ever reached the server, so after five seconds it believed everyone
+   * was five seconds behind, stopped the room, got a single tick while the
+   * clock was frozen, started again, and repeated. That was the stutter, and it
+   * happened on a perfect connection.
+   */
+  const live = useRef(null)
+  live.current = { phase: room.phase, paused: room.paused, t: room.t, blocked, full }
 
   useEffect(() => {
     let lastT = -1
-    let stalled = 0
+    let lastBuf = -1
+    let wedged = 0
+
     const id = setInterval(() => {
       const p = player.current
       if (!p) return
-      const starving = (p.ready() < 3 || blocked === 'play') && room.phase === 'playing'
-      setBuffering(starving)
+      const { phase, paused, t: roomT, blocked, full } = live.current
 
+      // Seconds in hand, not readyState — see BUF in lib.js.
+      const buf = blocked === 'play' ? 0 : p.buffered()
       const now = p.time()
-      const shouldMove = room.phase === 'playing' && !room.paused && !p.isPaused()
-      stalled = shouldMove && now === lastT ? stalled + 1 : 0
+      setBuffering(phase === 'playing' && !paused && buf < BUF.low)
+
+      // A slow connection and a wedged player look identical from out here,
+      // except a slow one is still growing its buffer. Only reload when nothing
+      // at all is moving — reloading throws away every byte downloaded so far,
+      // which on a thin line means it never gets to finish loading anything.
+      const moving = now !== lastT || buf > lastBuf + 0.05 || p.loading()
+      wedged = phase === 'playing' && !paused && !p.isPaused() && !moving ? wedged + 1 : 0
       lastT = now
-      if (stalled >= 4) {
-        stalled = 0
-        const at = Math.max(room.t, now)
+      lastBuf = buf
+      if (wedged >= 8) {
+        wedged = 0
+        const at = Math.max(roomT, now)
         p.reload()
         setTimeout(() => { p.seek(at); p.play().catch(() => {}) }, 400)
       }
-      send({ type: 'tick', t: now, buffering: starving, paused: p.isPaused(), focus: full })
+
+      send({ type: 'tick', t: now, buf, paused: p.isPaused(), focus: full })
     }, 1000)
     return () => clearInterval(id)
-  }, [send, full, room.phase, room.paused, room.t, blocked])
+  }, [send])
 
   /* -------------------------------------------------------- notifications */
 
@@ -114,6 +153,18 @@ export default function Room({ party }) {
   }, [chat, chatMode, chatOpen])
 
   useEffect(() => {
+    party.onSound(({ id, name, from }) => {
+      playSound(id)
+      if (from === youId) return
+      setSfxToast({ name, at: Date.now() })
+      setTimeout(() => setSfxToast((t) => (t && Date.now() - t.at >= 1800 ? null : t)), 2000)
+    })
+  }, [party, youId])
+
+  // The film is the point; drop the game the moment there's something to watch.
+  useEffect(() => { if (!hostAway) setGameOpen(false) }, [hostAway])
+
+  useEffect(() => {
     if (full) return
     cardTimers.current.forEach(clearTimeout)
     cardTimers.current.clear()
@@ -131,15 +182,22 @@ export default function Room({ party }) {
   }
   useEffect(() => { poke(); return () => clearTimeout(hideTimer.current) }, [full, playing]) // eslint-disable-line
 
+  // Two things have to happen: Razzy's own chrome collapses, and the phone's
+  // system bars go. Only the second needs the platform, and only the app can
+  // ask for it — requestFullscreen is a no-op in a Capacitor WebView.
   const enterFull = () => {
     setFull(true)
     setChatOpen(false)
+    immersive(true)
     shell.current?.requestFullscreen?.({ navigationUI: 'hide' }).catch(() => {})
   }
   const exitFull = () => {
     setFull(false)
+    immersive(false)
     if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {})
   }
+  // Leaving the room, or the component, must never strand the bars hidden.
+  useEffect(() => () => immersive(false), [])
   useEffect(() => {
     const on = () => { if (!document.fullscreenElement) setFull(false) }
     document.addEventListener('fullscreenchange', on)
@@ -244,6 +302,34 @@ export default function Room({ party }) {
 
           {room.phase === 'ready' && <ReadyCheck room={room} you={you} members={members} send={send} />}
 
+          {/* The host has dropped, and only the host can press play. Rather than
+              stare at a frozen frame, there's something to do. */}
+          {hostAway && !gameOpen && !full && (
+            <div className="absolute inset-x-2 bottom-2 z-30">
+              <div className="glass rounded-2xl p-2.5 flex items-center gap-2.5 pop">
+                <span className="grid place-items-center rounded-xl bg-grass/20 text-grass shrink-0"
+                      style={{ width: 40, height: 40 }}>
+                  <Gamepad2 size={18} />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-semibold leading-tight truncate">{hostMember.name} dropped out</div>
+                  <div className="text-[11px] text-white/45 leading-tight">Play a round while you wait?</div>
+                </div>
+                <Button kind="primary" className="px-4 shrink-0" style={{ minHeight: 40 }}
+                        onClick={() => setGameOpen(true)}>
+                  Play
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {sfxToast && (
+            <div className="absolute bottom-2 left-1/2 -translate-x-1/2 z-40 glass rounded-full px-3 h-9 flex items-center gap-2 text-xs pop pointer-events-none">
+              <Zap size={13} className="text-grass" />
+              {sfxToast.name}
+            </div>
+          )}
+
           {full && (
             <>
               <div
@@ -326,6 +412,24 @@ export default function Room({ party }) {
         </aside>
       )}
 
+      {/* Its own window on purpose: the game binds mousedown, touchstart and the
+          spacebar to `window` and appends a canvas to `document.body`. Inlined
+          here it would swallow every tap in the app; closing the iframe unwinds
+          all of it, WebGL context included. */}
+      {gameOpen && (
+        <div className="fixed inset-0 z-[85] bg-ink">
+          <iframe src="/game/" title="Stack" className="w-full h-full border-0" />
+          <button
+            onClick={() => setGameOpen(false)}
+            className="press glass absolute right-3 rounded-2xl px-4 flex items-center gap-2 text-xs font-semibold"
+            style={{ top: 'calc(var(--top) + 0.75rem)', height: 'var(--tap)' }}
+          >
+            <X size={15} />
+            Back
+          </button>
+        </div>
+      )}
+
       {menu && (
         <MemberSheet
           target={room.members.find((m) => m.id === menu)}
@@ -396,15 +500,20 @@ function TopBar({ room, members, youId, isOwner, isHost, onMember, onLeave, comp
 
 function Controls({ room, isHost, send, duration, sources, active, quality, setQuality, player, onFull, onChat, unread, compact }) {
   const [menu, setMenu] = useState(false)
-  const [levels, setLevels] = useState([])
-  const [ytLevel, setYtLevel] = useState('default')
+  const [ytActual, setYtActual] = useState('auto')
+  const [ytOwn, setYtOwn] = useState(false)
   const pct = duration ? (Math.min(room.t, duration) / duration) * 100 : 0
   const isYouTube = active?.kind === 'youtube'
 
+  // What YouTube actually settled on. Polled rather than assumed: nothing the
+  // page asks for is honoured, so this readout is the only truth available.
   useEffect(() => {
-    if (!menu || !isYouTube) return
-    setLevels(player.current?.qualities?.() || [])
-  }, [menu, isYouTube, player])
+    if (!isYouTube) return
+    const read = () => setYtActual(player.current?.quality?.() || 'auto')
+    read()
+    const id = setInterval(read, 2000)
+    return () => clearInterval(id)
+  }, [isYouTube, player])
 
   const pick = (i) => {
     const at = Math.max(room.t, player.current?.time?.() ?? 0)
@@ -522,24 +631,26 @@ function Controls({ room, isHost, send, duration, sources, active, quality, setQ
                 )}
               </div>
             ))}
-            {isYouTube && levels.length > 0 && (
+            {isYouTube && (
               <>
                 <div className="h-px bg-white/10 my-1" />
-                {['default', ...levels].map((lv) => (
-                  <button
-                    key={lv}
-                    onClick={() => { player.current?.setQuality?.(lv); setYtLevel(lv); setMenu(false) }}
-                    className={`press w-full flex items-center gap-2 rounded-xl px-3 text-sm text-left ${
-                      lv === ytLevel ? 'bg-grass/20 text-grass' : ''
-                    }`}
-                    style={{ minHeight: 44 }}
-                  >
-                    {lv === ytLevel ? <Check size={14} strokeWidth={3} /> : <span className="w-3.5" />}
-                    {lv === 'default' ? 'Auto' : lv}
-                  </button>
-                ))}
+                <div className="px-3 py-1 text-sm flex items-center justify-between">
+                  <span className="text-white/60">Playing</span>
+                  <span className="font-semibold">{YT_LABEL[ytActual] || 'Auto'}</span>
+                </div>
+                <button
+                  onClick={() => { const on = !ytOwn; setYtOwn(on); player.current?.setOwnControls?.(on); setMenu(false) }}
+                  className={`press w-full flex items-center gap-2 rounded-xl px-3 text-sm text-left ${
+                    ytOwn ? 'bg-grass/20 text-grass' : ''
+                  }`}
+                  style={{ minHeight: 44 }}
+                >
+                  {ytOwn ? <Check size={14} strokeWidth={3} /> : <span className="w-3.5" />}
+                  YouTube's own controls
+                </button>
                 <p className="px-3 py-1 text-[11px] text-white/30 leading-snug">
-                  YouTube treats this as a hint.
+                  YouTube ignores anything this page asks for. Its gear menu is the
+                  one place a quality choice sticks.
                 </p>
               </>
             )}
@@ -601,6 +712,39 @@ function ChatPanel({ chat, pending, isHost, send, youId, onClose, keyboard = 0, 
           )}
         </div>
 
+        {/* The host's source box lives up here, well away from the message box.
+            Directly above it the two were constantly confused for each other and
+            links kept going out as chat. */}
+        {isHost && (
+          <form
+            className="px-2 pb-2 flex gap-2 shrink-0"
+            onSubmit={(e) => {
+              e.preventDefault()
+              if (url.trim()) { send({ type: 'source', url: url.trim() }); setUrl('') }
+            }}
+          >
+            <input
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="YouTube or PixelDrain link"
+              autoCapitalize="off"
+              autoCorrect="off"
+              className="flex-1 min-w-0 bg-white/6 rounded-full px-4 text-sm outline-none"
+              style={{ height: 44 }}
+            />
+            <Button kind="ghost" type="submit" className="px-3 text-sm" style={{ minHeight: 44 }}>Load</Button>
+            {hasSource && (
+              <Button
+                kind="ghost" type="button" className="px-3" style={{ minHeight: 44 }}
+                aria-label="Add as another quality"
+                onClick={() => { if (url.trim()) { send({ type: 'addQuality', url: url.trim() }); setUrl('') } }}
+              >
+                +
+              </Button>
+            )}
+          </form>
+        )}
+
         <div ref={list} className="flex-1 overflow-y-auto no-scrollbar px-3 space-y-2 pb-2 min-h-0">
           {isHost && pending.map((p) => (
             <div key={p.id} className="glass rounded-2xl p-2.5 flex items-center gap-2.5 pop">
@@ -643,6 +787,22 @@ function ChatPanel({ chat, pending, isHost, send, youId, onClose, keyboard = 0, 
             transition: 'padding-bottom 0.18s ease-out',
           }}
         >
+          {/* Soundboard: everyone in the party hears it, so it sits with the
+              message box rather than behind a menu. */}
+          <div className="flex gap-1.5 overflow-x-auto no-scrollbar">
+            {SOUNDS.map((s) => (
+              <button
+                key={s.id}
+                onClick={() => send({ type: 'sfx', id: s.id })}
+                className="press shrink-0 flex items-center gap-1.5 rounded-full px-3 bg-white/6 text-xs"
+                style={{ height: 34 }}
+              >
+                <Zap size={12} className="text-grass" />
+                {s.label}
+              </button>
+            ))}
+          </div>
+
           <form
             className="flex gap-2"
             onSubmit={(e) => {
@@ -664,36 +824,6 @@ function ChatPanel({ chat, pending, isHost, send, youId, onClose, keyboard = 0, 
               <Send size={17} />
             </Button>
           </form>
-
-          {isHost && (
-            <form
-              className="flex gap-2"
-              onSubmit={(e) => {
-                e.preventDefault()
-                if (url.trim()) { send({ type: 'source', url: url.trim() }); setUrl('') }
-              }}
-            >
-              <input
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-                placeholder="YouTube or PixelDrain link"
-                autoCapitalize="off"
-                autoCorrect="off"
-                className="flex-1 min-w-0 bg-white/6 rounded-full px-4 text-sm outline-none"
-                style={{ height: 44 }}
-              />
-              <Button kind="ghost" type="submit" className="px-3 text-sm" style={{ minHeight: 44 }}>Load</Button>
-              {hasSource && (
-                <Button
-                  kind="ghost" type="button" className="px-3" style={{ minHeight: 44 }}
-                  aria-label="Add as another quality"
-                  onClick={() => { if (url.trim()) { send({ type: 'addQuality', url: url.trim() }); setUrl('') } }}
-                >
-                  +
-                </Button>
-              )}
-            </form>
-          )}
         </div>
       </div>
     </div>

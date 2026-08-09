@@ -43,6 +43,16 @@ export const api = {
   media: (s) => (s?.startsWith('/') ? api.url(s) : s),
 }
 
+/**
+ * Hide or restore the system bars. The Fullscreen API does nothing useful in a
+ * Capacitor WebView, so "Full screen" has to ask the activity directly —
+ * without this the notification bar sits on top of the film. Harmlessly absent
+ * when the same code runs in a browser.
+ */
+export const immersive = (on) => {
+  try { window.RazzyNative?.setImmersive?.(!!on) } catch {}
+}
+
 /* ------------------------------------------------------------- identity */
 
 const ls = {
@@ -88,6 +98,8 @@ export function useParty() {
   const intent = useRef(null)
   const inRoom = useRef(false)
   const onChat = useRef(() => {})
+  const onSfx = useRef(() => {})
+  const heard = useRef(0) // when the server last said anything at all
 
   const send = useCallback((msg) => {
     if (ws.current?.readyState === 1) ws.current.send(JSON.stringify(msg))
@@ -113,8 +125,10 @@ export function useParty() {
     }
 
     sock.onmessage = (e) => {
+      heard.current = Date.now()
       const m = JSON.parse(e.data)
       if (m.type === 'ping') return sock.send(JSON.stringify({ type: 'pong', ts: m.ts }))
+      if (m.type === 'sfx') return onSfx.current(m)
       if (m.type === 'joined') {
         setYouId(m.you)
         setRoom(m.room)
@@ -168,6 +182,25 @@ export function useParty() {
     }
   }, [open])
 
+  /**
+   * …and the other half of it: wifi handing over to mobile data leaves a socket
+   * that is open as far as readyState is concerned and dead as far as anything
+   * else is. No close event ever comes, so the app sits there "connected"
+   * forever. The server pings every three seconds, so silence is the only
+   * honest signal.
+   */
+  useEffect(() => {
+    const id = setInterval(() => {
+      const s = ws.current
+      if (!s || !heard.current) return
+      if (s.readyState === 1 && Date.now() - heard.current > 10_000) {
+        heard.current = 0
+        s.close() // onclose reconnects and walks us back into the same seat
+      }
+    }, 3000)
+    return () => clearInterval(id)
+  }, [])
+
   useEffect(() => {
     if (countdown === null) return
     const t = setTimeout(() => setCountdown(null), countdown === 0 ? 700 : 1000)
@@ -191,6 +224,7 @@ export function useParty() {
     isHost: isOwner || !!you?.coHost,
     chat, error, setError, countdown, connected, declined,
     onChatMessage: (fn) => { onChat.current = fn },
+    onSound: (fn) => { onSfx.current = fn },
     send, create, join,
   }
 }

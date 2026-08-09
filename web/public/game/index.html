@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>Stack</title>
+<style>
+  :root { --grass: #22c55e; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; overflow: hidden; background: #08090b; color: #fff; cursor: pointer;
+    font-family: ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+    -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent;
+  }
+  canvas { display: block; }
+
+  #score {
+    position: absolute; top: calc(env(safe-area-inset-top) + 18px); left: 0; right: 0;
+    text-align: center; font-size: 3.5rem; font-weight: 800; line-height: 1;
+    text-shadow: 0 4px 24px rgba(0,0,0,.6); pointer-events: none;
+  }
+  .panel {
+    position: absolute; inset: 0; display: none; place-items: center; padding: 1.5rem;
+    background: rgba(8,9,11,.72); backdrop-filter: blur(14px); text-align: center;
+  }
+  .panel.show { display: grid; }
+  .card {
+    max-width: 22rem; padding: 1.75rem; border-radius: 1.5rem;
+    background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12);
+    box-shadow: inset 0 1px 1px rgba(255,255,255,.18), 0 20px 60px rgba(0,0,0,.5);
+  }
+  .card h1 { margin: 0 0 .5rem; font-size: 1.25rem; }
+  .card p { margin: .4rem 0; color: rgba(255,255,255,.55); font-size: .9rem; line-height: 1.45; }
+  .card b { color: var(--grass); }
+  button {
+    margin-top: 1.1rem; width: 100%; min-height: 48px; border: 0; border-radius: 1rem;
+    background: var(--grass); color: #04140a; font: inherit; font-weight: 700; font-size: 1rem;
+    cursor: pointer;
+  }
+  button:active { transform: scale(.97); }
+</style>
+</head>
+<body>
+  <div id="score">0</div>
+
+  <div id="instructions" class="panel show">
+    <div class="card">
+      <h1>Stack</h1>
+      <p>Tap when the moving block lines up with the stack.</p>
+      <p>Miss, and it's over. How high can you get?</p>
+      <button id="start">Start</button>
+    </div>
+  </div>
+
+  <div id="results" class="panel">
+    <div class="card">
+      <h1>Missed it</h1>
+      <p>You stacked <b id="final">0</b> blocks.</p>
+      <button id="again">Play again</button>
+    </div>
+  </div>
+
+  <script src="three.min.js"></script>
+  <script src="cannon.min.js"></script>
+  <script src="stack.js"></script>
+</body>
+</html>

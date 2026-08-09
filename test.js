@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { newCode, parsePixeldrain, parseYouTube, qualityLabel, resolveSource, laggards, syncAction, nextOwner, ALPHABET } from './lib.js'
+import { BUF, newCode, parsePixeldrain, parseYouTube, qualityLabel, resolveSource, holdingUp, syncAction, nextOwner, ALPHABET } from './lib.js'
 
 // codes
 const c = newCode()
@@ -52,24 +52,34 @@ assert.equal(qualityLabel('holiday.mp4'), 'Source', 'no hint -> fallback')
 assert.equal(qualityLabel('holiday.mp4', 'Option 2'), 'Option 2', 'caller picks the fallback')
 assert.equal(qualityLabel('720pixels of nothing.mp4'), 'Source', 'not a bare resolution token')
 
-// laggards: who holds the room up
-const M = (o) => ({ online: true, approved: true, buffering: false, t: 100, skipped: false, ...o })
-assert.equal(laggards([M({ id: 'a' }), M({ id: 'b', t: 99 })], 100).length, 0, '1s behind is fine')
-assert.equal(laggards([M({ id: 'b', t: 90 })], 100)[0].id, 'b', '10s behind holds the room')
-assert.equal(laggards([M({ id: 'b', buffering: true })], 100)[0].id, 'b', 'buffering holds the room')
-assert.equal(laggards([M({ id: 'b', t: 90, skipped: true })], 100).length, 0, 'owner skipped them')
-assert.equal(laggards([M({ id: 'b', t: 90, online: false })], 100).length, 0, 'offline never blocks')
-assert.equal(laggards([M({ id: 'b', t: 90, approved: false })], 100).length, 0, 'pending never blocks')
-assert.equal(laggards([M({ id: 'b', t: 400 })], 100).length, 0, 'ahead is not behind')
+// holdingUp: who the room is waiting for
+const M = (o) => ({ online: true, approved: true, buf: 10, t: 100, skipped: false, ...o })
+assert.equal(holdingUp([M({ id: 'a' }), M({ id: 'b', t: 99 })], 100).length, 0, 'a second behind is fine')
+assert.equal(holdingUp([M({ id: 'b', buf: 0.1 })], 100)[0].id, 'b', 'out of buffer holds the room')
+assert.equal(holdingUp([M({ id: 'b', t: 80 })], 100)[0].id, 'b', 'far enough behind is lost, not slow')
+assert.equal(holdingUp([M({ id: 'b', buf: 0.1, skipped: true })], 100).length, 0, 'host skipped them')
+assert.equal(holdingUp([M({ id: 'b', buf: 0.1, online: false })], 100).length, 0, 'offline never blocks')
+assert.equal(holdingUp([M({ id: 'b', buf: 0.1, approved: false })], 100).length, 0, 'pending never blocks')
+assert.equal(holdingUp([M({ id: 'b', t: 400 })], 100).length, 0, 'ahead is not behind')
+assert.equal(holdingUp([M({ id: 'b', buf: undefined })], 100).length, 0, 'never reported gets the benefit')
 
-// drift correction
+// The thresholds must not be one number, or the room oscillates: it resumes the
+// instant the buffer touches the line, drains it, and stops again a second later.
+assert.ok(BUF.resume > BUF.low * 3, 'stop and start levels are far apart')
+const thin = [M({ id: 'b', buf: 2 })]
+assert.equal(holdingUp(thin, 100, BUF.low).length, 0, '2s in hand keeps playing')
+assert.equal(holdingUp(thin, 100, BUF.resume)[0].id, 'b', 'but is not enough to restart on')
+
+// drift correction: seeking abandons the buffer, so it is the last resort
 assert.equal(syncAction(100, 100).rate, 1)
 assert.equal(syncAction(100, 100).seek, null)
 assert.equal(syncAction(100, 100.5).seek, null, 'small drift nudges rate, never seeks')
 assert.ok(syncAction(100, 100.5).rate > 1, 'behind -> speed up')
 assert.ok(syncAction(100, 99.5).rate < 1, 'ahead -> slow down')
-assert.equal(syncAction(100, 105).seek, 105, 'big drift seeks')
-assert.equal(syncAction(100, 105).rate, 1, 'seeking resets rate')
+assert.equal(syncAction(100, 105).seek, null, 'five seconds behind still rides the rate')
+assert.ok(syncAction(100, 105).rate <= 1.1, 'and never at a silly speed')
+assert.equal(syncAction(100, 130).seek, 130, 'genuinely lost -> seek')
+assert.equal(syncAction(100, 130).rate, 1, 'seeking resets rate')
 
 // crown transfer
 const mem = [

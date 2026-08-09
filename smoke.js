@@ -23,7 +23,7 @@ fs.rmSync(DATA, { recursive: true, force: true })
 
 const server = spawn(process.execPath, ['server.js'], {
   cwd: import.meta.dirname,
-  env: { ...process.env, PORT, DATA_DIR: DATA, OWNER_GRACE_MS: 2000 },
+  env: { ...process.env, PORT, DATA_DIR: DATA, OWNER_GRACE_MS: 2000, SEAT_HOLD_MS: 2000 },
   stdio: ['ignore', 'pipe', 'inherit'],
 })
 const done = async (code) => {
@@ -54,7 +54,8 @@ function client(label) {
       new Promise((res, rej) => {
         const hit = fresh ? null : seen.find(pred)
         if (hit) return res(hit)
-        const t = setTimeout(() => rej(new Error(`${label}: timeout waiting for message`)), ms)
+        const t = setTimeout(
+          () => rej(new Error(`${label}: timed out after ${ms}ms waiting for ${pred}`)), ms)
         const on = (raw) => {
           const m = JSON.parse(raw)
           if (pred(m)) { clearTimeout(t); ws.off('message', on); res(m) }
@@ -130,8 +131,8 @@ console.log('· stream route serves ranges and refuses foreign URLs')
 // 6. ready check -> countdown -> playing
 host.send({ type: 'start' })
 await guest.wait((m) => m.type === 'state' && m.room.phase === 'ready')
-host.send({ type: 'tick', t: 0, buffering: false })
-guest.send({ type: 'tick', t: 0, buffering: false })
+host.send({ type: 'tick', t: 0, buf: 30 })
+guest.send({ type: 'tick', t: 0, buf: 30 })
 guest.send({ type: 'ready' })
 const three = await guest.wait((m) => m.type === 'countdown')
 assert.equal(three.n, 3, 'countdown starts at 3')
@@ -141,7 +142,7 @@ console.log('· ready check + countdown -> playing')
 
 // 7. the room clock advances
 const t0 = playing.room.t
-host.send({ type: 'tick', t: t0 + 2, buffering: false })
+host.send({ type: 'tick', t: t0 + 2, buf: 30 })
 await new Promise((r) => setTimeout(r, 1500))
 assert.ok(host.last('state').room.t > t0, 'clock advanced')
 
@@ -152,7 +153,7 @@ assert.equal(paused.room.pausedBy, guestJoined.you, 'the room knows who paused')
 console.log('· guest paused the room')
 
 // 9. a straggler holds the room, and the owner can skip them
-guest.send({ type: 'tick', t: 0, buffering: true })
+guest.send({ type: 'tick', t: 0, buf: 0 })
 await new Promise((r) => setTimeout(r, 1400))
 assert.ok(host.last('state').room.waiting.includes(guestJoined.you), 'buffering guest holds the room')
 host.send({ type: 'skip', id: guestJoined.you })
@@ -408,6 +409,217 @@ assert.ok((await pre2.json()).url.startsWith('/avatars/'))
 const opt = await fetch(`${base}/api/v1/health`, { method: 'OPTIONS' })
 assert.equal(opt.status, 204, 'preflight answered')
 console.log('· app API: health, party, resolve, avatar, CORS')
+
+/* ------------------------------------------------------------------------ *
+ * Regressions. Every one of these shipped broken; none of them should return. *
+ * ------------------------------------------------------------------------ */
+
+// A two-person party sitting at the ready check, on a YouTube source so there's
+// no host to probe and nothing to download.
+async function readyParty(tag, cap = 4) {
+  const a = client(tag + '-host')
+  await a.ready
+  a.send({ type: 'create', name: 'H', cap })
+  const aj = await a.wait((m) => m.type === 'joined')
+  const c = aj.room.code
+
+  const b = client(tag + '-guest')
+  await b.ready
+  b.send({ type: 'join', code: c, name: 'G' })
+  const bj = await b.wait((m) => m.type === 'joined')
+  const req = await a.wait((m) => m.type === 'joinreq')
+  a.send({ type: 'approve', id: req.id, ok: true })
+
+  a.send({ type: 'source', url: 'https://youtu.be/dQw4w9WgXcQ' })
+  await a.wait((m) => m.type === 'state' && m.room.sources.length, 10000)
+  a.send({ type: 'start' })
+  await b.wait((m) => m.type === 'state' && m.room.phase === 'ready', 8000)
+  return { a, b, aj, bj, code: c }
+}
+
+// 26. The countdown waits for buffers — and, crucially, comes back. It used to
+// flip the room to 'ready' and return without rescheduling itself, so a party
+// whose guest was still buffering hung on "Starting…" with nothing left alive
+// to restart it.
+{
+  const { a, b, aj, bj } = await readyParty('gate')
+  a.send({ type: 'tick', t: 0, buf: 30 })
+  b.send({ type: 'tick', t: 0, buf: 0 }) // nothing downloaded yet
+  b.send({ type: 'ready' })
+  await new Promise((r) => setTimeout(r, 2500))
+  assert.equal(a.last('state').room.phase, 'ready', 'countdown holds while someone has no buffer')
+  assert.ok(a.last('state').room.waiting.includes(bj.you), 'and says who it is waiting for')
+
+  b.send({ type: 'tick', t: 0, buf: 30 }) // buffer arrives
+  const go = await b.wait((m) => m.type === 'state' && m.room.phase === 'playing', 12000, true)
+  assert.equal(go.room.paused, false, 'and starts by itself once everyone is loaded')
+  a.ws.close(); b.ws.close()
+  void aj
+  console.log('· countdown waits for buffers, then recovers on its own')
+}
+
+// 27. Stopping and starting at the same buffer level makes the room oscillate:
+// it resumes the moment the buffer touches the line, drains it, stops again a
+// second later. That flapping — several times a minute, on a fine connection —
+// was the bug people actually felt.
+{
+  const { a, b, bj } = await readyParty('hyst')
+  a.send({ type: 'tick', t: 0, buf: 30 })
+  b.send({ type: 'tick', t: 0, buf: 30 })
+  b.send({ type: 'ready' })
+  await b.wait((m) => m.type === 'state' && m.room.phase === 'playing', 12000)
+
+  const keep = setInterval(() => a.send({ type: 'tick', t: a.last('state')?.room.t ?? 0, buf: 30 }), 400)
+  const starve = setInterval(() => b.send({ type: 'tick', t: a.last('state')?.room.t ?? 0, buf: 0 }), 400)
+  const stopped = await a.wait((m) => m.type === 'state' && m.room.paused, 10000, true)
+  assert.equal(stopped.room.pausedBy, null, 'the room stopped for a starving viewer')
+  clearInterval(starve)
+
+  // Just past the "still playing" threshold, but nowhere near enough to restart on.
+  const scrape = setInterval(() => b.send({ type: 'tick', t: a.last('state')?.room.t ?? 0, buf: 1.5 }), 400)
+  await new Promise((r) => setTimeout(r, 3000))
+  assert.equal(a.last('state').room.paused, true, 'a sliver of buffer does not restart the room')
+  clearInterval(scrape)
+
+  const full2 = setInterval(() => b.send({ type: 'tick', t: a.last('state')?.room.t ?? 0, buf: 30 }), 400)
+  await a.wait((m) => m.type === 'state' && !m.room.paused, 10000, true)
+  clearInterval(full2); clearInterval(keep)
+  a.ws.close(); b.ws.close()
+  void bj
+  console.log('· room stops for a starving viewer and waits for a real cushion')
+}
+
+// 28. The owner's player *is* the room clock, but only forwards. A reload or a
+// quality switch reads 0 for a moment, and taking that literally threw everyone
+// back to the start of the film.
+{
+  const { a, b } = await readyParty('clock')
+  a.send({ type: 'tick', t: 0, buf: 30 })
+  b.send({ type: 'tick', t: 0, buf: 30 })
+  b.send({ type: 'ready' })
+  await b.wait((m) => m.type === 'state' && m.room.phase === 'playing', 12000)
+  a.send({ type: 'tick', t: 120, buf: 30 })
+  await new Promise((r) => setTimeout(r, 1200))
+  assert.ok(a.last('state').room.t >= 120, 'owner drives the clock forward')
+
+  a.send({ type: 'tick', t: 0, buf: 0 }) // a player that has just been reloaded
+  await new Promise((r) => setTimeout(r, 1500))
+  assert.ok(a.last('state').room.t >= 120, 'a player reading zero does not rewind the room')
+  a.ws.close(); b.ws.close()
+  console.log('· a reloading owner cannot throw the room back to the start')
+}
+
+// 29. Rooms reporting "full" with nobody in them: every member who had ever
+// joined counted against the cap forever, and a restored room came back stuffed
+// with people who were never returning.
+{
+  const solo2 = client('seat-host')
+  await solo2.ready
+  solo2.send({ type: 'create', name: 'H', cap: 2 })
+  const sj = await solo2.wait((m) => m.type === 'joined')
+  const c2 = sj.room.code
+
+  const tmp = client('seat-guest')
+  await tmp.ready
+  tmp.send({ type: 'join', code: c2, name: 'Temp' })
+  const tr = await solo2.wait((m) => m.type === 'joinreq')
+  solo2.send({ type: 'approve', id: tr.id, ok: true })
+  await new Promise((r) => setTimeout(r, 200))
+  assert.equal((await (await fetch(`${base}/api/v1/party/${c2}`)).json()).full, true, 'two of two seats taken')
+
+  tmp.ws.close() // and they never come back
+  await new Promise((r) => setTimeout(r, 2600)) // past SEAT_HOLD_MS
+  assert.equal((await (await fetch(`${base}/api/v1/party/${c2}`)).json()).full, false, 'their seat is released')
+
+  const late = client('seat-late')
+  await late.ready
+  late.send({ type: 'join', code: c2, name: 'Late' })
+  const ok = await Promise.race([
+    solo2.wait((m) => m.type === 'joinreq' && m.name === 'Late', 4000).then(() => true, () => false),
+    late.wait((m) => m.type === 'error', 4000).then(() => false, () => true),
+  ])
+  assert.equal(ok, true, 'and somebody else can actually take it')
+  solo2.ws.close(); late.ws.close()
+  console.log('· a seat is released when its occupant does not come back')
+}
+
+// 30. Soundboard: one tap, everyone hears it — with a cooldown, because a
+// soundboard without one is a weapon.
+{
+  const { a, b, bj } = await readyParty('sfx')
+  b.send({ type: 'sfx', id: 'razzy' })
+  const heard = await a.wait((m) => m.type === 'sfx', 5000, true)
+  assert.equal(heard.id, 'razzy')
+  assert.equal(heard.from, bj.you, 'the room knows who pressed it')
+
+  b.send({ type: 'sfx', id: 'razzy' }) // straight away
+  // wait() rejects on timeout, and here the timeout *is* the pass condition
+  const spam = await a.wait((m) => m.type === 'sfx', 1000, true).then(() => true, () => false)
+  assert.equal(spam, false, 'a second press inside the cooldown is dropped')
+  a.ws.close(); b.ws.close()
+  console.log('· soundboard reaches the room, and is rate limited')
+}
+
+// 31. Walking into a film already well under way. The newcomer's player starts
+// at zero, which is far enough from the room clock to hold everyone up — so the
+// room stops for them, and the only thing that can clear it is that player
+// seeking to where the room actually is. A guard that suppressed exactly that
+// seek (because the room was waiting for them) deadlocked the party outright.
+{
+  const { a, b } = await readyParty('latecomer', 4)
+  a.send({ type: 'tick', t: 0, buf: 30 })
+  b.send({ type: 'tick', t: 0, buf: 30 })
+  b.send({ type: 'ready' })
+  await b.wait((m) => m.type === 'state' && m.room.phase === 'playing', 12000)
+
+  // Jump the room well into the film — a newcomer only counts as lost once they
+  // are further out than normal drift, so a few seconds in proves nothing.
+  a.send({ type: 'seek', t: 600 })
+  await new Promise((r) => setTimeout(r, 2000))
+  const drive = setInterval(() => {
+    const t = a.last('state')?.room.t ?? 600
+    a.send({ type: 'tick', t, buf: 30 })
+    b.send({ type: 'tick', t, buf: 30 })
+  }, 500)
+  await new Promise((r) => setTimeout(r, 1500))
+
+  const roomT = a.last('state').room.t
+  assert.ok(roomT > 590, `the film is genuinely under way (t=${roomT})`)
+
+  // A third person arrives, and their player knows nothing but t=0.
+  const late = client('latecomer-3')
+  await late.ready
+  late.send({ type: 'join', code: a.last('state').room.code, name: 'Late' })
+  const lj = await late.wait((m) => m.type === 'joined')
+  const lreq = await a.wait((m) => m.type === 'joinreq' && m.name === 'Late')
+  a.send({ type: 'approve', id: lreq.id, ok: true })
+  const stuck = setInterval(() => late.send({ type: 'tick', t: 0, buf: 30 }), 500)
+  await new Promise((r) => setTimeout(r, 2000))
+  assert.ok(a.last('state').room.waiting.includes(lj.you), 'the room waits for someone in the wrong place')
+  clearInterval(stuck)
+  clearInterval(drive)
+
+  // Their client seeks to the room, which is the whole point.
+  const catchUp = setInterval(() => {
+    const t = a.last('state')?.room.t ?? 600
+    late.send({ type: 'tick', t, buf: 30 })
+    a.send({ type: 'tick', t, buf: 30 })
+    b.send({ type: 'tick', t, buf: 30 })
+  }, 500)
+  await a.wait((m) => m.type === 'state' && !m.room.waiting.length && !m.room.paused, 12000, true)
+  clearInterval(catchUp)
+  a.ws.close(); b.ws.close(); late.ws.close()
+  console.log('· joining mid-film does not wedge the room')
+}
+
+// 32. Nothing under /api may answer with the SPA's index.html — the app parses
+// JSON, and "Unexpected token '<'" is a terrible way to learn a URL is wrong.
+{
+  const missing = await fetch(`${base}/api/v1/nope`)
+  assert.equal(missing.status, 404, 'unknown API route is a 404')
+  assert.match(missing.headers.get('content-type') || '', /json/, 'and it is JSON, not a web page')
+  console.log('· unknown API routes 404 as JSON')
+}
 
 console.log('\nok — end to end passed')
 done(0)

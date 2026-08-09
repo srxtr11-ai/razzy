@@ -86,7 +86,7 @@ The things that make a WebView feel like a web page, all handled:
 - **`user-scalable=no`** — pinch-zooming a synced player is never wanted.
 - Heavy `backdrop-filter` is dropped on devices that report `update: slow`.
 
-## The one line that matters most
+## The two lines that matter most
 
 ```java
 settings.setMediaPlaybackRequiresUserGesture(false);
@@ -95,6 +95,25 @@ settings.setMediaPlaybackRequiresUserGesture(false);
 Android WebView refuses to start any media without a touch. Without this, every
 viewer lands in the "tap to play" fallback on every video — a watch party is
 told when to play by the room, not by the person holding the phone.
+
+```java
+webView.addJavascriptInterface(new Shell(), "RazzyNative");
+```
+
+The only thing the page can ask the platform for: `setImmersive(boolean)`. The
+Fullscreen API does nothing useful in a Capacitor WebView, so without this the
+"Full screen" button could only collapse Razzy's own chrome and the notification
+bar stayed sitting on top of the film. Immersive mode uses
+`BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE`, so a swipe brings the bars back
+temporarily — a hidden navigation bar can never trap anyone. Android restores
+them whenever the window regains focus, so `onWindowFocusChanged` re-applies.
+
+## Shared code
+
+`src/components/players.jsx` and `src/sfx.js` are one-line re-exports of the
+website's. They used to be copies, which is precisely why a buffering fix could
+land on the site and leave the app still broken — `lib.js` is already shared
+across the repo root the same way.
 
 ## Icons
 
