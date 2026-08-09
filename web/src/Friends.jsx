@@ -148,9 +148,11 @@ function Thread({ party, f, onBack, onClose }) {
           <UserPlus size={15} />
           Invite
         </Button>
+        {/* Not gated on them being online: someone with their phone in a pocket
+            is exactly who you want to ring, and the server holds it for them. */}
         <Button
-          kind="ghost" className="flex-1 h-10" disabled={!inParty || !f.online}
-          title={inParty ? '' : 'Start a party first'}
+          kind="ghost" className="flex-1 h-10" disabled={!inParty}
+          title={inParty ? (f.online ? '' : "They'll get it when they open the app") : 'Start a party first'}
           onClick={() => party.call(f.id)}
         >
           <Phone size={15} />
@@ -178,6 +180,15 @@ function Thread({ party, f, onBack, onClose }) {
         )}
         {msgs.map((m) => {
           const mine = m.from === party.me?.id
+          // A call nobody picked up isn't something either of you said.
+          if (m.kind === 'missed') {
+            return (
+              <p key={m.id} className="flex items-center justify-center gap-1.5 text-[11px] text-white/30 py-1">
+                <PhoneOff size={11} />
+                {mine ? `You called ${f.name}` : `Missed call from ${f.name}`}
+              </p>
+            )
+          }
           return (
             <div key={m.id} className={`flex ${mine ? 'justify-end' : 'justify-start'}`}>
               <div
@@ -370,7 +381,11 @@ export function CallOverlay({ party }) {
         <div>
           <div className="text-xl font-semibold">{person?.name || 'Someone'}</div>
           <div className="text-sm text-white/50">
-            {ring ? `Wants you in party ${ring.code}` : 'Ringing…'}
+            {ring
+              ? `Wants you in party ${ring.code}`
+              : calling.waiting
+                ? "Not there — they'll get it when they open the app"
+                : 'Ringing…'}
           </div>
         </div>
 

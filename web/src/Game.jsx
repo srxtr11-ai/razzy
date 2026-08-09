@@ -52,7 +52,7 @@ export default function GameOverlay({ party, solo, onClose }) {
 
   return (
     <div className="fixed inset-0 z-[92] bg-ink">
-      <iframe ref={frame} src="/game/" title="Stack" className="w-full h-full border-0" onLoad={arm} />
+      <iframe ref={frame} src="/game/index.html" title="Stack" className="w-full h-full border-0" onLoad={arm} />
 
       <button
         onClick={quit}

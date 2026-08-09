@@ -37,15 +37,28 @@ export default function App() {
       {playing && (
         <GameOverlay party={party} solo={!party.match?.playing} onClose={() => setSoloGame(false)} />
       )}
+      {/* A scrim, not just an invisible click-catcher. Without it the panel slid
+          over a fully lit room and read as two screens fighting rather than one
+          on top of the other. */}
+      <div
+        onClick={() => setFriendsOpen(false)}
+        className={`fixed inset-0 z-[84] transition-opacity duration-300 ${
+          friendsOpen ? 'opacity-100' : 'opacity-0 pointer-events-none'
+        }`}
+        style={{ background: 'rgba(4,5,7,.6)' }}
+      />
       <div
         className={`fixed inset-y-0 right-0 z-[85] w-[min(92vw,24rem)] transition-transform duration-400 ease-[cubic-bezier(.34,1.2,.64,1)]
           ${friendsOpen ? 'translate-x-0' : 'translate-x-full pointer-events-none'}`}
       >
-        <div className="h-full m-2 rounded-[1.75rem] liquid overflow-hidden">
+        {/* Opaque: a translucent panel over a moving film is unreadable. */}
+        <div
+          className="h-full m-2 rounded-[1.75rem] liquid overflow-hidden"
+          style={{ background: '#0e1116' }}
+        >
           <Friends party={party} onClose={() => setFriendsOpen(false)} />
         </div>
       </div>
-      {friendsOpen && <div className="fixed inset-0 z-[84]" onClick={() => setFriendsOpen(false)} />}
     </>
   )
 

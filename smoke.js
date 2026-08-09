@@ -739,7 +739,25 @@ async function readyParty(tag, cap = 4) {
   assert.equal(result.winner, 'user-b', 'the higher tower wins')
   console.log('· friends: challenge at Stack, and the best score wins')
 
-  A.c.ws.close(); B.c.ws.close(); stranger.ws.close(); fresh.ws.close()
+  // Someone with their phone in a pocket is exactly who you want to ring, so a
+  // call to an absent friend is held rather than refused, and handed over the
+  // moment they appear.
+  B.c.ws.close()
+  await new Promise((r) => setTimeout(r, 600))
+  A.c.send({ type: 'call', id: 'user-b' })
+  const held = await A.c.wait((m) => m.type === 'calling', 5000, true)
+  assert.equal(held.waiting, true, 'the caller is told they are not there')
+
+  const backAgain = client('bea-again')
+  await backAgain.ready
+  backAgain.send({ type: 'hello', id: 'user-b', name: 'Bea' })
+  const late = await backAgain.wait((m) => m.type === 'ring', 6000)
+  assert.equal(late.from.name, 'Amir', 'and the ring is waiting when they open the app')
+  backAgain.send({ type: 'callDecline', callId: late.callId })
+  await A.c.wait((m) => m.type === 'callend', 5000, true)
+  console.log('· friends: a call to someone away is held, not refused')
+
+  A.c.ws.close(); backAgain.ws.close(); stranger.ws.close(); fresh.ws.close()
 }
 
 // 32. A share button on a phone hands out a shortened link with no artist,

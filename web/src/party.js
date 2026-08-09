@@ -24,6 +24,9 @@ const lastParty = {
 
 const WS_URL = () => `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`
 
+/** Worth nothing by the time a dropped connection comes back. */
+const TRANSIENT = new Set(['tick', 'typing', 'pong'])
+
 /**
  * Owns the socket. Reconnects forever and re-enters the party with the same id,
  * so a phone locking its screen doesn't lose your seat.
@@ -56,10 +59,30 @@ export function useParty() {
   const onDm = useRef(() => {})
   const onSocial = useRef(() => {}) // friend requests, invites, incoming calls
   const heard = useRef(0) // when the server last said anything at all
+  const pending = useRef([]) // sent while offline, waiting for a socket
 
+  /**
+   * Anything sent while the socket is between connections used to vanish without
+   * a word, so a button pressed a second after coming back from the background
+   * simply did nothing — most obviously Answer on a call, which is exactly when
+   * the connection is still catching up.
+   *
+   * Positions and typing flags are deliberately dropped instead of queued:
+   * replaying where you were ten seconds ago is worse than saying nothing.
+   */
   const send = useCallback((msg) => {
-    if (ws.current?.readyState === 1) ws.current.send(JSON.stringify(msg))
+    const s = ws.current
+    if (s?.readyState === 1) return s.send(JSON.stringify(msg))
+    if (TRANSIENT.has(msg?.type)) return
+    pending.current.push(msg)
+    if (pending.current.length > 20) pending.current.shift()
   }, [])
+
+  const flush = (sock) => {
+    const held = pending.current
+    pending.current = []
+    for (const msg of held) sock.send(JSON.stringify(msg))
+  }
 
   const open = useCallback(() => {
     const sock = new WebSocket(WS_URL())
@@ -78,6 +101,7 @@ export function useParty() {
         if (code) intent.current = { type: 'join', code, ...identity() }
       }
       if (intent.current) sock.send(JSON.stringify(intent.current))
+      flush(sock)
     }
 
     sock.onclose = () => {

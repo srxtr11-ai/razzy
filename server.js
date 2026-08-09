@@ -210,7 +210,7 @@ db.exec(`
   );
   CREATE TABLE IF NOT EXISTS dms (
     id TEXT PRIMARY KEY, pair TEXT NOT NULL, fromId TEXT NOT NULL,
-    text TEXT NOT NULL, at INTEGER NOT NULL
+    text TEXT NOT NULL, at INTEGER NOT NULL, kind TEXT NOT NULL DEFAULT 'user'
   );
   CREATE INDEX IF NOT EXISTS dms_pair ON dms (pair, at);
 `)
@@ -221,6 +221,7 @@ db.exec(`
 for (const col of ['winsA INTEGER NOT NULL DEFAULT 0', 'winsB INTEGER NOT NULL DEFAULT 0', 'draws INTEGER NOT NULL DEFAULT 0']) {
   try { db.exec(`ALTER TABLE friends ADD COLUMN ${col}`) } catch {}
 }
+try { db.exec(`ALTER TABLE dms ADD COLUMN kind TEXT NOT NULL DEFAULT 'user'`) } catch {}
 
 const q = {
   user: db.prepare(`SELECT * FROM users WHERE id = ?`),
@@ -237,7 +238,7 @@ const q = {
   winB: db.prepare(`UPDATE friends SET winsB = winsB + 1 WHERE pair = ?`),
   drawn: db.prepare(`UPDATE friends SET draws = draws + 1 WHERE pair = ?`),
   dropLink: db.prepare(`DELETE FROM friends WHERE pair = ?`),
-  addDm: db.prepare(`INSERT INTO dms (id,pair,fromId,text,at) VALUES (?,?,?,?,?)`),
+  addDm: db.prepare(`INSERT INTO dms (id,pair,fromId,text,at,kind) VALUES (?,?,?,?,?,?)`),
   dmPage: db.prepare(`SELECT * FROM dms WHERE pair = ? ORDER BY at DESC LIMIT 200`),
   lastDm: db.prepare(`SELECT * FROM dms WHERE pair = ? ORDER BY at DESC LIMIT 1`),
   trimDms: db.prepare(
@@ -392,8 +393,31 @@ function endCall(callId, reason) {
   if (!c) return
   clearTimeout(c.timer)
   calls.delete(callId)
+  // A call nobody picked up is worth a line in the conversation — it's the only
+  // place they'd think to look, and it survives the phone being off.
+  if (reason === 'missed' || reason === 'gone') noteMissed(c.from, c.to)
   toUser(c.from, { type: 'callend', callId, reason })
   toUser(c.to, { type: 'callend', callId, reason })
+}
+
+function noteMissed(from, to) {
+  const pair = pairKey(from, to)
+  const msg = { id: randomUUID(), pair, fromId: from, text: 'Missed call', at: Date.now(), kind: 'missed' }
+  q.addDm.run(msg.id, pair, msg.fromId, msg.text, msg.at, msg.kind)
+  q.trimDms.run(pair, pair)
+  const out = { type: 'dm', msg: { ...msg, from } }
+  toUser(from, { ...out, with: to })
+  toUser(to, { ...out, with: from })
+  pushFriends(from)
+  pushFriends(to)
+}
+
+/** A ring that arrived while they were away, handed over the moment they appear. */
+function deliverHeldCalls(userId) {
+  for (const [callId, c] of calls) {
+    if (c.to !== userId) continue
+    toUser(userId, { type: 'ring', callId, from: publicUser(q.user.get(c.from)), code: c.code })
+  }
 }
 
 /* ------------------------------------------------------------- room clock */
@@ -794,6 +818,7 @@ wss.on('connection', (ws) => {
       sessions.get(who.id).add(ws)
       send(ws, { type: 'me', user: { ...publicUser(who), key: who.key } })
       pokeFriends(who.id)
+      deliverHeldCalls(who.id) // a ring that came while they were away
       return
     }
 
@@ -851,8 +876,8 @@ wss.on('connection', (ws) => {
       const text = String(m.text || '').slice(0, MAX_MSG).trim()
       if (!text) return
       const pair = pairKey(who.id, to)
-      const msg = { id: randomUUID(), pair, fromId: who.id, text, at: Date.now() }
-      q.addDm.run(msg.id, pair, msg.fromId, msg.text, msg.at)
+      const msg = { id: randomUUID(), pair, fromId: who.id, text, at: Date.now(), kind: 'user' }
+      q.addDm.run(msg.id, pair, msg.fromId, msg.text, msg.at, msg.kind)
       q.trimDms.run(pair, pair)
       const out = { type: 'dm', with: to, msg: { ...msg, from: who.id, name: who.name } }
       send(ws, out)
@@ -896,11 +921,13 @@ wss.on('connection', (ws) => {
       const call = { from: who.id, to, code, at: Date.now() }
       call.timer = setTimeout(() => endCall(callId, 'missed'), RING_MS)
       calls.set(callId, call)
-      if (!toUser(to, { type: 'ring', callId, from: publicUser(who), code })) {
-        endCall(callId, 'offline')
-        return fail('They are offline')
-      }
-      send(ws, { type: 'calling', callId, to })
+
+      // Ring them if they're there. If they aren't, hold it rather than refusing
+      // — someone whose phone is in a pocket is exactly who you want to call, and
+      // the ring is delivered the moment they open the app. If it runs out first
+      // it becomes a missed call in the conversation, which is where they'd look.
+      const reached = toUser(to, { type: 'ring', callId, from: publicUser(who), code })
+      send(ws, { type: 'calling', callId, to, waiting: !reached })
       return
     }
 

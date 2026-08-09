@@ -9,6 +9,9 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 const DEFAULT_BASE = 'https://razzy.up.railway.app'
 
+/** Worth nothing by the time a dropped connection comes back. */
+const TRANSIENT = new Set(['tick', 'typing', 'pong'])
+
 export const api = {
   get base() {
     return localStorage.getItem('razzy.server') || DEFAULT_BASE
@@ -91,6 +94,11 @@ export const notify = (tag, title, body, urgent = false, callId = null) => {
 export const clearNote = (tag) => {
   try { native()?.cancelNote?.(noteId(tag)) } catch {}
 }
+
+/** An Answer or Decline tapped in the shade, if one is waiting. */
+export const takeAction = () => {
+  try { return native()?.takeAction?.() || '' } catch { return '' }
+}
 export const hasShell = () => !!native()
 
 /* ------------------------------------------------------------- identity */
@@ -150,10 +158,31 @@ export function useParty() {
   const onChat = useRef(() => {})
   const onSfx = useRef(() => {})
   const heard = useRef(0) // when the server last said anything at all
+  const pending = useRef([]) // sent while offline, waiting for a socket
 
+  /**
+   * Anything sent while the socket is between connections used to vanish
+   * silently, so a button pressed a second after the app came back from the
+   * background did nothing at all. That is exactly when Answer gets pressed —
+   * the phone has been asleep, the socket is still catching up — which is why
+   * the call buttons looked dead.
+   *
+   * Positions and typing flags are dropped rather than queued: replaying where
+   * you were ten seconds ago is worse than saying nothing.
+   */
   const send = useCallback((msg) => {
-    if (ws.current?.readyState === 1) ws.current.send(JSON.stringify(msg))
+    const s = ws.current
+    if (s?.readyState === 1) return s.send(JSON.stringify(msg))
+    if (TRANSIENT.has(msg?.type)) return
+    pending.current.push(msg)
+    if (pending.current.length > 20) pending.current.shift()
   }, [])
+
+  const flush = (sock) => {
+    const held = pending.current
+    pending.current = []
+    for (const msg of held) sock.send(JSON.stringify(msg))
+  }
 
   const withMembers = (r) => (r ? { ...r, members: absolutiseAll(r.members) } : r)
 
@@ -182,6 +211,7 @@ export function useParty() {
         if (code) intent.current = { type: 'join', code, ...identity() }
       }
       if (intent.current) sock.send(JSON.stringify(intent.current))
+      flush(sock)
     }
 
     sock.onclose = () => {
@@ -351,13 +381,29 @@ export function useParty() {
    * the socket is in this page.
    */
   useEffect(() => {
-    window.__razzyCall = (action, callId) => {
+    /**
+     * Collect an Answer or Decline tapped in the shade. Pulled rather than
+     * pushed: the activity parks the decision and this asks for it once the page
+     * exists, so tapping Answer with the app closed can't lose the race.
+     */
+    const pull = () => {
+      const parked = takeAction()
+      if (!parked) return
+      const [action, callId] = parked.split(' ')
       if (!callId) return
       send({ type: action === 'answer' ? 'callAnswer' : 'callDecline', callId })
       clearNote(`call-${callId}`)
-      if (action !== 'answer') setRing((r) => (r?.callId === callId ? null : r))
+      // Either way the ring is dealt with — answering goes straight into the
+      // party, so showing the Answer button again would be asking twice.
+      setRing((r) => (r?.callId === callId ? null : r))
     }
-    return () => { delete window.__razzyCall }
+    window.__razzyPull = pull
+    pull()
+    document.addEventListener('visibilitychange', pull)
+    return () => {
+      delete window.__razzyPull
+      document.removeEventListener('visibilitychange', pull)
+    }
   }, [send])
 
   useEffect(() => {

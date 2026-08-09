@@ -33,6 +33,8 @@ public class MainActivity extends BridgeActivity {
     /** Whether it wants to survive being backgrounded (i.e. we're in a party). */
     private boolean keepAlive = false;
     private WebView web;
+    /** An Answer or Decline tapped in the shade, waiting for the page to collect it. */
+    private String pendingAction = null;
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
@@ -154,6 +156,14 @@ public class MainActivity extends BridgeActivity {
         public void cancelNote(final int id) {
             NotificationManagerCompat.from(MainActivity.this).cancel(id);
         }
+
+        /** "answer <callId>" or "decline <callId>", once, or empty. */
+        @JavascriptInterface
+        public String takeAction() {
+            String p = pendingAction;
+            pendingAction = null;
+            return p == null ? "" : p;
+        }
     }
 
     /**
@@ -177,17 +187,24 @@ public class MainActivity extends BridgeActivity {
         handleAction(intent);
     }
 
-    /** Hand the choice to the page, which owns the socket. */
+    /**
+     * Park the choice; the page collects it.
+     *
+     * Pushing it in after a fixed delay was a guess about how long the web layer
+     * takes to be ready, and a cold start — tapping Answer with the app closed —
+     * loses that race. Parking it means the answer waits however long it needs
+     * to. The nudge below is only for the case where the page is already up.
+     */
     private void handleAction(Intent intent) {
         if (intent == null) return;
         String action = intent.getStringExtra("razzyAction");
         String call = intent.getStringExtra("razzyCall");
-        if (action == null || call == null || web == null) return;
+        if (action == null || call == null) return;
         intent.removeExtra("razzyAction");
-        final String js = "window.__razzyCall && window.__razzyCall("
-            + JSONObject.quote(action) + "," + JSONObject.quote(call) + ")";
-        // A cold start has no page yet; a moment's delay is enough for one.
-        web.postDelayed(() -> web.evaluateJavascript(js, null), 600);
+        pendingAction = action + " " + call;
+        if (web != null) {
+            web.postDelayed(() -> web.evaluateJavascript("window.__razzyPull && window.__razzyPull()", null), 400);
+        }
     }
 
     private void channels() {
