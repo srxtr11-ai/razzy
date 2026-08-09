@@ -714,7 +714,25 @@ async function readyParty(tag, cap = 4) {
   A.c.ws.close(); B.c.ws.close(); stranger.ws.close(); fresh.ws.close()
 }
 
-// 32. Nothing under /api may answer with the SPA's index.html — the app parses
+// 32. A share button on a phone hands out a shortened link with no artist,
+// track or id in it — only a redirect. Refusing what someone just copied is a
+// bad first impression, so it gets followed.
+{
+  const short = await fetch(
+    `${base}/api/v1/resolve?url=${encodeURIComponent('https://on.soundcloud.com/nonsense-that-does-not-exist')}`)
+  assert.equal(short.status, 400, 'a shortened link that leads nowhere is still refused')
+
+  const full = await (await fetch(
+    `${base}/api/v1/resolve?url=${encodeURIComponent('https://soundcloud.com/uiceheidd/lucid-dreams-forget-me')}`)).json()
+  assert.equal(full.kind, 'soundcloud', 'a full SoundCloud link resolves')
+
+  const sp = await (await fetch(
+    `${base}/api/v1/resolve?url=${encodeURIComponent('https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT')}`)).json()
+  assert.equal(sp.kind, 'spotify')
+  console.log('· music links resolve, shortened ones are followed')
+}
+
+// 33. Nothing under /api may answer with the SPA's index.html — the app parses
 // JSON, and "Unexpected token '<'" is a terrible way to learn a URL is wrong.
 {
   const missing = await fetch(`${base}/api/v1/nope`)

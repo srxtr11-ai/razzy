@@ -758,7 +758,7 @@ function ChatPanel({ chat, pending, isHost, send, youId, onClose, keyboard = 0, 
             <input
               value={url}
               onChange={(e) => setUrl(e.target.value)}
-              placeholder="YouTube or PixelDrain link"
+              placeholder="Paste a link — YouTube, PixelDrain, SoundCloud, Spotify"
               autoCapitalize="off"
               autoCorrect="off"
               className="flex-1 min-w-0 bg-white/6 rounded-full px-4 text-sm outline-none"

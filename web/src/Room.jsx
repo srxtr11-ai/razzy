@@ -872,7 +872,7 @@ function ChatPanel({ chat, pending, isOwner, isHost, send, youId, urlDraft, setU
             <input
               value={urlDraft}
               onChange={(e) => setUrlDraft(e.target.value)}
-              placeholder="YouTube or PixelDrain link"
+              placeholder="Paste a link — YouTube, PixelDrain, SoundCloud, Spotify"
               className="flex-1 bg-white/6 rounded-full px-4 h-10 text-sm outline-none focus:bg-white/12 transition min-w-0"
             />
             <Button kind="ghost" type="submit" className="h-10 px-4 shrink-0 bg-white/6">

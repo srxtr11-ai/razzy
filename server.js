@@ -451,6 +451,28 @@ function maybeStart(r) {
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0 Safari/537.36'
 const probeCache = new Map() // host -> plays directly in a browser?
 
+const EMBED_NAME = { youtube: 'YouTube', soundcloud: 'SoundCloud', spotify: 'Spotify' }
+
+/**
+ * Shortened share links. The SoundCloud and Spotify apps' share buttons hand out
+ * a URL with no artist, track or id in it — only a redirect — so the parsers
+ * have nothing to read and what someone just copied gets rejected. Following it
+ * once is the whole fix.
+ */
+function isShortLink(url) {
+  return /^https?:\/\/(on\.soundcloud\.com|snd\.sc|spotify\.link)\//i.test(String(url || '').trim())
+}
+
+async function expandLink(url) {
+  try {
+    // HEAD first: these are redirect stubs, so the body is never wanted.
+    const r = await fetch(url, { method: 'HEAD', redirect: 'follow', headers: { 'User-Agent': UA } })
+    return r.url || url
+  } catch {
+    return url
+  }
+}
+
 /** The file's own name, when the host will tell us — it usually carries "720p". */
 async function describeFile(url) {
   const id = parsePixeldrain(url)
@@ -596,7 +618,9 @@ app.get('/api/v1/party/:code', async (req, reply) => {
 
 /** What would this link turn into? Lets the app validate before sending it. */
 app.get('/api/v1/resolve', async (req, reply) => {
-  const src = resolveSource(req.query?.url || '')
+  const url = req.query?.url || ''
+  // Same courtesy as the socket path: chase a share-button link before refusing it.
+  const src = resolveSource(url) || (isShortLink(url) ? resolveSource(await expandLink(url)) : null)
   if (!src) return reply.code(400).send({ error: 'unsupported link' })
   return { kind: src.kind, origin: src.origin }
 })
@@ -926,44 +950,54 @@ wss.on('connection', (ws) => {
     // `add` appends another rendition of the same video (a 1080p next to the
     // 720p) instead of replacing it, so viewers can pick per their bandwidth.
     if ((m.type === 'source' || m.type === 'addQuality') && isHost()) {
-      const src = resolveSource(m.url)
-      if (!src) return fail('Paste a YouTube link, a PixelDrain link, or a direct .mp4')
       const r = room
       const add = m.type === 'addQuality'
       if (add && !r.sources?.length) return fail('Load a video first')
 
-      const put = (source, proxied, label) => {
-        const entry = { id: randomUUID(), kind: src.kind, source, origin: src.origin, proxied, label }
-        if (add) {
-          r.sources = [...(r.sources || []), entry]
-          say(r, `Added a ${label} option`)
-        } else {
-          r.sources = [entry]
-          r.phase = 'idle'
-          r.t = 0
-          r.paused = true
-          r.pausedBy = null
-          r.behindTicks = 0
-          r.countingDown = false
-          r.seekedAt = 0
-          r.duration = 0
-          for (const x of r.members.values()) { x.ready = false; x.skipped = false; x.t = 0; x.buf = null }
-          say(r, src.kind === 'youtube'
-            ? 'New video loaded from YouTube'
-            : proxied ? 'New video loaded (streaming through the server)' : 'New video loaded')
+      const load = (url) => {
+        const src = resolveSource(url)
+        if (!src) return fail('Paste a YouTube, PixelDrain, SoundCloud or Spotify link — or a direct .mp4')
+
+        const put = (source, proxied, label) => {
+          const entry = { id: randomUUID(), kind: src.kind, source, origin: src.origin, proxied, label }
+          if (add) {
+            r.sources = [...(r.sources || []), entry]
+            say(r, `Added a ${label} option`)
+          } else {
+            r.sources = [entry]
+            r.phase = 'idle'
+            r.t = 0
+            r.paused = true
+            r.pausedBy = null
+            r.behindTicks = 0
+            r.countingDown = false
+            r.seekedAt = 0
+            r.duration = 0
+            for (const x of r.members.values()) { x.ready = false; x.skipped = false; x.t = 0; x.buf = null }
+            say(r, src.kind === 'file'
+              ? (proxied ? 'New video loaded (streaming through the server)' : 'New video loaded')
+              : `Now playing from ${label}`)
+          }
+          pushState(r)
         }
-        pushState(r)
+
+        // Everything except a plain file plays in someone else's embed: no bytes
+        // to carry, nothing to probe. Sending those down the file path had them
+        // fetched and possibly routed through /stream, which would have served an
+        // HTML page as video.
+        if (src.kind !== 'file') return put(src.source, false, EMBED_NAME[src.kind])
+
+        describeFile(src.source)
+          .then((name) => qualityLabel(name || src.source, `Option ${(r.sources?.length || 0) + 1}`))
+          .then((label) =>
+            chooseSource(src.source).then(({ play, proxied }) => put(play, proxied, label)))
+          .catch(() => fail('Could not reach that file'))
       }
 
-      // YouTube plays in its own embedded player: nothing to probe, no bytes to
-      // carry, and its own quality levels are offered by the player itself.
-      if (src.kind === 'youtube') return put(src.source, false, 'YouTube')
-
-      describeFile(src.source)
-        .then((name) => qualityLabel(name || src.source, `Option ${(r.sources?.length || 0) + 1}`))
-        .then((label) =>
-          chooseSource(src.source).then(({ play, proxied }) => put(play, proxied, label)))
-        .catch(() => fail('Could not reach that file'))
+      // The share button on a phone hands out a shortened link carrying nothing
+      // but a redirect. Chase it rather than rejecting what someone just copied.
+      if (!resolveSource(m.url) && isShortLink(m.url)) expandLink(m.url).then(load)
+      else load(m.url)
       return
     }
 
