@@ -135,10 +135,27 @@ piece of work, and it's the only way to get it.
 
 ## Shared code
 
-`src/components/players.jsx` and `src/sfx.js` are one-line re-exports of the
-website's. They used to be copies, which is precisely why a buffering fix could
-land on the site and leave the app still broken — `lib.js` is already shared
-across the repo root the same way.
+`src/components/players.jsx`, `src/sfx.js` and `src/Friends.jsx` are one-line
+re-exports of the website's. They used to be copies, which is precisely why a
+buffering fix could land on the site and leave the app still broken — `lib.js` is
+already shared across the repo root the same way.
+
+**This needs `resolve.dedupe` in `vite.config.js`, and the app is dead without
+it.** Those files live outside this project, so their `import ... from 'react'`
+resolves against `web/node_modules` while everything here uses its own copy. Two
+Reacts in one bundle means the second one's hook dispatcher is null and the app
+dies on the first `useState` — with a blank screen, no error on the device, and
+nothing in the launcher to suggest why. It builds and installs perfectly. If a
+future shared import ever brings its own dependency, add it to that list.
+
+The way to catch this without a phone is to serve the built bundle and open it:
+
+```bash
+npm run build && npx vite preview --port 8090 --host 127.0.0.1
+```
+
+It's the same code the APK ships, and a crash shows up in the console
+immediately instead of as a blank rectangle on a handset.
 
 ## Icons
 
