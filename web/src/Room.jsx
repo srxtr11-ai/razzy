@@ -73,7 +73,7 @@ export default function Room({ party }) {
         .then(() => setBlocked(false))
         .catch(() => p.playMuted().then(() => setBlocked('sound')).catch(() => setBlocked('play')))
     }
-  }, [room.phase, room.paused, room.t, active?.id])
+  }, [room.phase, room.paused, room.t, room.pausedBy, active?.id, youId])
 
   /**
    * What the ticker below needs to read, kept in a ref rather than in its
