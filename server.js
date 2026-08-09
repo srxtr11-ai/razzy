@@ -7,7 +7,10 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { Readable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
-import { BUF, newCode, parsePixeldrain, qualityLabel, resolveSource, holdingUp, nextOwner } from './lib.js'
+import {
+  BUF, newCode, newUserCode, pairKey, parsePixeldrain, qualityLabel,
+  resolveSource, holdingUp, nextOwner,
+} from './lib.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const DATA = process.env.DATA_DIR || path.join(HERE, 'data') // Railway volume mounts here
@@ -150,6 +153,163 @@ function rmAvatar(url) {
   fs.rm(path.join(AVATARS, path.basename(url)), { force: true }, () => {})
 }
 
+/* --------------------------------------------------------------- people */
+
+/**
+ * Parties are disposable; people are not. A room lives for an evening, but a
+ * friend list has to survive the browser being closed, the app being reinstalled
+ * and this server being redeployed — so unlike rooms, which live in memory with
+ * the database as a parachute, all of this *is* the database.
+ *
+ * Still no accounts and no passwords. Identity is the random id the client
+ * generated for itself; `code` is the shareable half and `key` the half that
+ * lets someone reclaim that identity on a new device.
+ */
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY, code TEXT UNIQUE NOT NULL, key TEXT NOT NULL,
+    name TEXT, avatar TEXT, seen INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS friends (
+    pair TEXT PRIMARY KEY, a TEXT NOT NULL, b TEXT NOT NULL,
+    asked TEXT NOT NULL, accepted INTEGER NOT NULL DEFAULT 0, at INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS dms (
+    id TEXT PRIMARY KEY, pair TEXT NOT NULL, fromId TEXT NOT NULL,
+    text TEXT NOT NULL, at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS dms_pair ON dms (pair, at);
+`)
+
+const q = {
+  user: db.prepare(`SELECT * FROM users WHERE id = ?`),
+  userByCode: db.prepare(`SELECT * FROM users WHERE code = ?`),
+  codes: db.prepare(`SELECT code FROM users`),
+  addUser: db.prepare(`INSERT INTO users (id,code,key,name,avatar,seen) VALUES (?,?,?,?,?,?)`),
+  touchUser: db.prepare(`UPDATE users SET name = ?, avatar = ?, seen = ? WHERE id = ?`),
+  seenUser: db.prepare(`UPDATE users SET seen = ? WHERE id = ?`),
+  links: db.prepare(`SELECT * FROM friends WHERE a = ? OR b = ?`),
+  link: db.prepare(`SELECT * FROM friends WHERE pair = ?`),
+  addLink: db.prepare(`INSERT INTO friends (pair,a,b,asked,accepted,at) VALUES (?,?,?,?,0,?)`),
+  acceptLink: db.prepare(`UPDATE friends SET accepted = 1 WHERE pair = ?`),
+  dropLink: db.prepare(`DELETE FROM friends WHERE pair = ?`),
+  addDm: db.prepare(`INSERT INTO dms (id,pair,fromId,text,at) VALUES (?,?,?,?,?)`),
+  dmPage: db.prepare(`SELECT * FROM dms WHERE pair = ? ORDER BY at DESC LIMIT 200`),
+  lastDm: db.prepare(`SELECT * FROM dms WHERE pair = ? ORDER BY at DESC LIMIT 1`),
+  trimDms: db.prepare(
+    `DELETE FROM dms WHERE pair = ? AND at < (SELECT MIN(at) FROM (SELECT at FROM dms WHERE pair = ? ORDER BY at DESC LIMIT 200))`
+  ),
+}
+
+/** userId -> the sockets that person currently has open (phone and laptop both). */
+const sessions = new Map()
+
+/** callId -> a ringing invitation that hasn't been answered yet. */
+const calls = new Map()
+const RING_MS = 45_000
+
+const recoveryKey = () => randomUUID().replace(/-/g, '').slice(0, 10).toUpperCase()
+
+function ensureUser(id, name, avatar) {
+  let u = q.user.get(id)
+  if (!u) {
+    u = {
+      id,
+      code: newUserCode(new Set(q.codes.all().map((r) => r.code))),
+      key: recoveryKey(),
+      name: String(name || 'Guest').slice(0, 24),
+      avatar: avatar || null,
+      seen: Date.now(),
+    }
+    q.addUser.run(u.id, u.code, u.key, u.name, u.avatar, u.seen)
+    return u
+  }
+  const nextName = name ? String(name).slice(0, 24) : u.name
+  const nextAvatar = avatar === undefined ? u.avatar : avatar
+  q.touchUser.run(nextName, nextAvatar, Date.now(), id)
+  return { ...u, name: nextName, avatar: nextAvatar, seen: Date.now() }
+}
+
+/** Which party someone is actually sitting in, so a friend can walk into it. */
+function partyOf(uid) {
+  for (const r of rooms.values()) {
+    const m = r.members.get(uid)
+    if (m && m.approved && m.online) return r.code
+  }
+  return null
+}
+
+const publicUser = (u) => u && { id: u.id, code: u.code, name: u.name, avatar: u.avatar }
+
+function friendsOf(id) {
+  const out = []
+  for (const l of q.links.all(id, id)) {
+    const otherId = l.a === id ? l.b : l.a
+    const u = q.user.get(otherId)
+    if (!u) continue
+    const last = q.lastDm.get(l.pair)
+    out.push({
+      ...publicUser(u),
+      accepted: !!l.accepted,
+      // Who is waiting on whom — the UI shows an Accept button for one and a
+      // "sent" label for the other.
+      incoming: !l.accepted && l.asked !== id,
+      outgoing: !l.accepted && l.asked === id,
+      online: sessions.has(otherId),
+      party: partyOf(otherId),
+      seen: u.seen,
+      last: last ? { text: last.text, at: last.at, mine: last.fromId === id } : null,
+    })
+  }
+  return out.sort((x, y) => (y.online ? 1 : 0) - (x.online ? 1 : 0) || x.name.localeCompare(y.name))
+}
+
+function pushFriends(id) {
+  const socks = sessions.get(id)
+  if (!socks) return
+  const friends = friendsOf(id)
+  for (const s of socks) send(s, { type: 'friends', friends })
+}
+
+/** Anything that changes how this person looks to others: presence, party, name. */
+function pokeFriends(id) {
+  pushFriends(id)
+  for (const l of q.links.all(id, id)) pushFriends(l.a === id ? l.b : l.a)
+}
+
+/** Deliver to every device someone has open. Returns whether anyone was there. */
+function toUser(id, msg) {
+  const socks = sessions.get(id)
+  if (!socks?.size) return false
+  for (const s of socks) send(s, msg)
+  return true
+}
+
+const areFriends = (a, b) => {
+  const l = q.link.get(pairKey(a, b))
+  return !!l?.accepted
+}
+
+/**
+ * Someone a host has personally called or invited shouldn't then have to queue
+ * at the door — the host already said yes by ringing them. Only a host's word
+ * counts, so an ordinary member inviting a friend still puts them in the queue.
+ */
+function expectGuest(r, userId, byId) {
+  const by = r.members.get(byId)
+  if (!by || (r.ownerId !== byId && !by.coHost)) return
+  ;(r.expected ||= new Set()).add(userId)
+}
+
+function endCall(callId, reason) {
+  const c = calls.get(callId)
+  if (!c) return
+  clearTimeout(c.timer)
+  calls.delete(callId)
+  toUser(c.from, { type: 'callend', callId, reason })
+  toUser(c.to, { type: 'callend', callId, reason })
+}
+
 /* ------------------------------------------------------------- room clock */
 
 // One timer for every room. Advances the clock, enforces auto-pause, hands over the crown.
@@ -172,6 +332,14 @@ setInterval(() => {
 
     if (r.phase === 'playing' && !r.paused) {
       r.t += (now - r.lastTick) / 1000
+      // Stop at the end instead of counting into empty space. Matters most for
+      // music, where a track runs out every three minutes.
+      if (r.duration && r.t >= r.duration) {
+        r.t = r.duration
+        r.paused = true
+        r.pausedBy = r.ownerId
+        r.behindTicks = 0
+      }
       // Every stream dips for a moment. Stopping the film for a dip is worse
       // than the dip, so someone has to be genuinely out of video for a few
       // seconds running before the room waits for them.
@@ -201,17 +369,23 @@ setInterval(() => {
         r.ownerGoneAt = now
         r.paused = true
         r.pausedBy = r.ownerId
+      } else if (!r.ownerSaid && now - r.ownerGoneAt > 5000) {
+        // Only once they've actually gone. Refreshing a page is a two-second
+        // round trip, and announcing it every time filled the chat with
+        // "dropped — paused / resumed" for something nobody saw happen.
+        r.ownerSaid = true
         say(r, `${owner.name} dropped — paused`)
       } else if (now - r.ownerGoneAt > OWNER_GRACE_MS) {
         const next = nextOwner([...r.members.values()], r.ownerId)
         if (next) {
           r.ownerId = next
           r.ownerGoneAt = null
+          r.ownerSaid = false
           r.paused = true
           say(r, `${r.members.get(next).name} is the owner now`)
         }
       }
-    } else if (owner?.online) r.ownerGoneAt = null
+    } else if (owner?.online) { r.ownerGoneAt = null; r.ownerSaid = false }
 
     pushState(r)
   }
@@ -454,6 +628,7 @@ app.server.on('upgrade', (req, socket, head) => {
 wss.on('connection', (ws) => {
   let room = null
   let me = null
+  let who = null // the person on the other end, independent of any party
 
   const fail = (msg) => send(ws, { type: 'error', error: msg })
   const isOwner = () => room && me && room.ownerId === me.id
@@ -473,6 +648,8 @@ wss.on('connection', (ws) => {
     // older one rather than leaving it to time out and report us offline.
     if (stale && stale !== ws) { try { stale.close() } catch {} }
     send(ws, { type: 'joined', you: member.id, room: publicRoom(r), chat: r.chat })
+    // Friends see which party you're in, so it has to be refreshed on the way in.
+    if (who) pokeFriends(who.id)
   }
 
   ws.on('message', (raw) => {
@@ -484,6 +661,149 @@ wss.on('connection', (ws) => {
     if (m.type === 'pong') {
       if (me) { me.ping = Date.now() - m.ts; me.lastPong = Date.now() }
       return
+    }
+
+    /* --- people ------------------------------------------------------ */
+
+    /**
+     * Sent by every client the moment it connects, party or no party. This is
+     * what makes presence, friend requests and calls reach someone sitting in
+     * the lobby — previously the server didn't know a socket existed until it
+     * was in a room.
+     */
+    if (m.type === 'hello') {
+      if (!m.id) return
+      who = ensureUser(m.id, m.name, m.avatar)
+      if (!sessions.has(who.id)) sessions.set(who.id, new Set())
+      sessions.get(who.id).add(ws)
+      send(ws, { type: 'me', user: { ...publicUser(who), key: who.key } })
+      pokeFriends(who.id)
+      return
+    }
+
+    /** Reclaim an identity on a new device: the public code plus the private key. */
+    if (m.type === 'restore') {
+      const u = q.userByCode.get(String(m.code || '').toUpperCase())
+      if (!u || u.key !== String(m.key || '').toUpperCase()) return fail('That code and key do not match')
+      send(ws, { type: 'restored', user: { ...publicUser(u), key: u.key } })
+      return
+    }
+
+    if (!who && m.type?.startsWith('friend')) return fail('not signed in')
+
+    if (m.type === 'friendAdd') {
+      const target = q.userByCode.get(String(m.code || '').toUpperCase().replace(/[^A-Z]/g, ''))
+      if (!target) return fail('No one has that code')
+      if (target.id === who.id) return fail('That is your own code')
+      const pair = pairKey(who.id, target.id)
+      const existing = q.link.get(pair)
+      if (existing?.accepted) return fail('Already friends')
+      if (existing) {
+        // They asked first and we just asked back — treat that as accepting.
+        if (existing.asked !== who.id) q.acceptLink.run(pair)
+        else return fail('Already asked — waiting for them')
+      } else {
+        const [a, b] = [who.id, target.id].sort()
+        q.addLink.run(pair, a, b, who.id, Date.now())
+      }
+      toUser(target.id, { type: 'friendreq', from: publicUser(who) })
+      pokeFriends(who.id)
+      return
+    }
+
+    if (m.type === 'friendAccept') {
+      const pair = pairKey(who.id, String(m.id || ''))
+      const l = q.link.get(pair)
+      if (!l || l.accepted || l.asked === who.id) return
+      q.acceptLink.run(pair)
+      toUser(m.id, { type: 'friendok', from: publicUser(who) })
+      pokeFriends(who.id)
+      return
+    }
+
+    if (m.type === 'friendRemove') {
+      const other = String(m.id || '')
+      q.dropLink.run(pairKey(who.id, other))
+      pokeFriends(who.id)
+      pushFriends(other)
+      return
+    }
+
+    if (m.type === 'dm' && who) {
+      const to = String(m.id || '')
+      if (!areFriends(who.id, to)) return fail('You can only message friends')
+      const text = String(m.text || '').slice(0, MAX_MSG).trim()
+      if (!text) return
+      const pair = pairKey(who.id, to)
+      const msg = { id: randomUUID(), pair, fromId: who.id, text, at: Date.now() }
+      q.addDm.run(msg.id, pair, msg.fromId, msg.text, msg.at)
+      q.trimDms.run(pair, pair)
+      const out = { type: 'dm', with: to, msg: { ...msg, from: who.id, name: who.name } }
+      send(ws, out)
+      toUser(to, { type: 'dm', with: who.id, msg: { ...msg, from: who.id, name: who.name } })
+      pushFriends(who.id)
+      pushFriends(to)
+      return
+    }
+
+    if (m.type === 'dmHistory' && who) {
+      const to = String(m.id || '')
+      if (!areFriends(who.id, to)) return
+      const rows = q.dmPage.all(pairKey(who.id, to)).reverse()
+      return send(ws, { type: 'dms', with: to, msgs: rows.map((r) => ({ ...r, from: r.fromId })) })
+    }
+
+    /** A quiet nudge: "come watch this", no ringing. */
+    if (m.type === 'invite' && who) {
+      const to = String(m.id || '')
+      if (!areFriends(who.id, to)) return fail('You can only invite friends')
+      const code = partyOf(who.id)
+      if (!code) return fail('Start a party first')
+      const r = rooms.get(code)
+      if (r) expectGuest(r, to, who.id)
+      if (!toUser(to, { type: 'invite', from: publicUser(who), code })) return fail('They are offline')
+      return
+    }
+
+    /**
+     * A call. There is no audio anywhere in this — the point is the ringing:
+     * answering drops you straight into the caller's party, which is a much
+     * faster way to get someone watching than typing a code at them.
+     */
+    if (m.type === 'call' && who) {
+      const to = String(m.id || '')
+      if (!areFriends(who.id, to)) return fail('You can only call friends')
+      const code = partyOf(who.id)
+      if (!code) return fail('Start a party first')
+      for (const [id, c] of calls) if (c.from === who.id && c.to === to) endCall(id, 'cancelled')
+      const callId = randomUUID()
+      const call = { from: who.id, to, code, at: Date.now() }
+      call.timer = setTimeout(() => endCall(callId, 'missed'), RING_MS)
+      calls.set(callId, call)
+      if (!toUser(to, { type: 'ring', callId, from: publicUser(who), code })) {
+        endCall(callId, 'offline')
+        return fail('They are offline')
+      }
+      send(ws, { type: 'calling', callId, to })
+      return
+    }
+
+    if (m.type === 'callAnswer' && who) {
+      const c = calls.get(String(m.callId || ''))
+      if (!c || c.to !== who.id) return
+      clearTimeout(c.timer)
+      calls.delete(m.callId)
+      const r = rooms.get(c.code)
+      if (r) expectGuest(r, who.id, c.from)
+      toUser(c.from, { type: 'callend', callId: m.callId, reason: 'answered' })
+      // The answering client walks itself into the party with this.
+      return send(ws, { type: 'calljoin', callId: m.callId, code: c.code })
+    }
+
+    if ((m.type === 'callDecline' || m.type === 'callCancel') && who) {
+      const c = calls.get(String(m.callId || ''))
+      if (!c || (c.to !== who.id && c.from !== who.id)) return
+      return endCall(String(m.callId), m.type === 'callCancel' ? 'cancelled' : 'declined')
     }
 
     if (m.type === 'create') {
@@ -511,14 +831,19 @@ wss.on('connection', (ws) => {
 
       if (seats(r) >= r.cap) return fail('Party is full')
       const id = m.id || randomUUID()
+      // A host who called or invited this person has already let them in.
+      const welcome = r.expected?.delete(id) || false
       const member = {
         id, name: String(m.name || 'Guest').slice(0, 24), avatar: m.avatar || null,
-        approved: false, online: true, joinedAt: Date.now(), ws: null,
+        approved: welcome, online: true, joinedAt: Date.now(), ws: null,
       }
       r.members.set(id, member)
       attach(r, member)
-      const owner = r.members.get(r.ownerId)
-      send(owner?.ws, { type: 'joinreq', id, name: member.name, avatar: member.avatar })
+      if (welcome) say(r, `${member.name} joined`)
+      else {
+        const owner = r.members.get(r.ownerId)
+        send(owner?.ws, { type: 'joinreq', id, name: member.name, avatar: member.avatar })
+      }
       return pushState(r)
     }
 
@@ -586,6 +911,7 @@ wss.on('connection', (ws) => {
       rmAvatar(gone.avatar)
       r.members.delete(gone.id)
       send(ws, { type: 'left' })
+      if (who) pokeFriends(who.id) // they're out of that party now
       if (![...r.members.values()].some((x) => x.approved)) return destroy(r) // last one out
       say(r, `${gone.name} left`)
       return pushState(r)
@@ -620,6 +946,7 @@ wss.on('connection', (ws) => {
           r.behindTicks = 0
           r.countingDown = false
           r.seekedAt = 0
+          r.duration = 0
           for (const x of r.members.values()) { x.ready = false; x.skipped = false; x.t = 0; x.buf = null }
           say(r, src.kind === 'youtube'
             ? 'New video loaded from YouTube'
@@ -689,12 +1016,20 @@ wss.on('connection', (ws) => {
 
     // Owner's player is the truth; everyone else just reports where they are.
     if (m.type === 'tick') {
-      const t = Math.max(0, Number(m.t) || 0)
+      // A null position means the player has one but doesn't know it yet — some
+      // embeds won't say until they've played once. Recorded as a real zero it
+      // looks like someone stuck at the start, and the room stops to wait for a
+      // player that can only start once the room is moving.
+      const t = m.t == null ? null : Math.max(0, Number(m.t) || 0)
+      // Stored as null rather than left alone: a member object survives a
+      // reconnect, so skipping the write would keep whatever stale position was
+      // there — which is exactly the "stuck at the start" this avoids.
+      // `holdingUp` reads `m.t ?? roomTime`, so null means "don't wait for me".
       me.t = t
       me.buf = Math.max(0, Number(m.buf) || 0)
       me.paused = !!m.paused
       me.focus = !!m.focus
-      if (isOwner() && !room.paused && room.phase === 'playing') {
+      if (t !== null && isOwner() && !room.paused && room.phase === 'playing') {
         // Forwards only, and never straight after a seek. A player that has just
         // been reloaded or swapped for another quality reads 0 for a moment, and
         // taking that literally threw the entire room back to the start of the
@@ -706,6 +1041,14 @@ wss.on('connection', (ws) => {
           room.lastTick = Date.now()
         }
       }
+      return
+    }
+
+    // Only the host's player is asked, and only once — everyone is watching the
+    // same thing, and a viewer who mis-reports it would stop the room early.
+    if (m.type === 'duration' && isHost()) {
+      const d = Number(m.d) || 0
+      if (d > 0) room.duration = d
       return
     }
 
@@ -747,6 +1090,18 @@ wss.on('connection', (ws) => {
 
   ws.on('close', () => {
     clearInterval(ping)
+
+    // Presence is per-socket, not per-person: closing a laptop shouldn't show
+    // you offline to your friends while your phone is still connected.
+    if (who) {
+      const socks = sessions.get(who.id)
+      socks?.delete(ws)
+      if (socks && !socks.size) sessions.delete(who.id)
+      q.seenUser.run(Date.now(), who.id)
+      for (const [id, c] of calls) if (c.from === who.id || c.to === who.id) endCall(id, 'gone')
+      pokeFriends(who.id)
+    }
+
     if (!room || !me) return
     // A reconnecting client usually lands its new socket *before* the old one's
     // close event arrives. Without this check the corpse of the old connection

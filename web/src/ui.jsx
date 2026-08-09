@@ -64,7 +64,10 @@ export const glare = {
 }
 
 export function Button({ kind = 'ghost', className = '', ...p }) {
-  const base = 'press rounded-full px-5 h-11 text-sm font-semibold disabled:opacity-40 disabled:active:scale-100'
+  // inline-flex in the base: without it an icon and its label don't share a
+  // baseline, and every button with both rendered with the icon adrift.
+  const base = `press rounded-full px-5 h-11 text-sm font-semibold inline-flex items-center
+    justify-center gap-2 whitespace-nowrap disabled:opacity-40 disabled:active:scale-100`
   const kinds = {
     primary: 'bg-grass text-black hover:bg-grass-dim shadow-[0_4px_14px_-2px_rgba(34,197,94,.5)]',
     ghost: 'text-white/85 hover:text-white hover:bg-white/10',

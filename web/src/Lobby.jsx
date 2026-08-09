@@ -1,5 +1,5 @@
-import { useRef, useState } from 'react'
-import { Camera, Clapperboard, LogIn, Minus, Plus } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { Camera, Clapperboard, LogIn, Minus, Plus, Users } from 'lucide-react'
 import { identity, remember, uploadAvatar } from './party.js'
 import { Avatar, Button, glare } from './ui.jsx'
 
@@ -14,7 +14,7 @@ export function Ambient() {
   )
 }
 
-export default function Lobby({ party }) {
+export default function Lobby({ party, onFriends, friendCount = 0 }) {
   const me = identity()
   const [name, setName] = useState(me.name)
   const [avatar, setAvatar] = useState(me.avatar)
@@ -25,6 +25,14 @@ export default function Lobby({ party }) {
 
   const ready = name.trim().length > 0
   const save = () => remember(name.trim(), avatar)
+
+  // Your friends see this name, and they see it before you have joined anything,
+  // so it can't wait for the first party to be saved.
+  useEffect(() => {
+    if (!name.trim()) return
+    const t = setTimeout(() => party.setProfile(name.trim(), avatar), 600)
+    return () => clearTimeout(t)
+  }, [name, avatar]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const pick = async (e) => {
     const f = e.target.files?.[0]
@@ -37,6 +45,19 @@ export default function Lobby({ party }) {
   return (
     <>
       <Ambient />
+      {/* Friends live outside any party, so the way in is here too. */}
+      <button
+        onClick={onFriends}
+        className="liquid press fixed top-4 right-4 z-40 rounded-2xl h-11 px-4 flex items-center gap-2 text-sm font-semibold"
+      >
+        <Users size={16} />
+        Friends
+        {friendCount > 0 && (
+          <span className="min-w-5 h-5 px-1 rounded-full bg-grass text-black text-[11px] font-bold grid place-items-center">
+            {friendCount}
+          </span>
+        )}
+      </button>
       <div className="min-h-full grid place-items-center p-6">
         <div className="w-full max-w-sm rise">
           {/* 3.39:1 lockup — fix the height and let width follow, so it never distorts */}

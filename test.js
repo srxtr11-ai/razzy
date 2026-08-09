@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { BUF, newCode, parsePixeldrain, parseYouTube, qualityLabel, resolveSource, holdingUp, syncAction, nextOwner, ALPHABET } from './lib.js'
+import { BUF, newCode, newUserCode, pairKey, parsePixeldrain, parseYouTube, qualityLabel, resolveSource, holdingUp, syncAction, nextOwner, ALPHABET } from './lib.js'
 
 // codes
 const c = newCode()
@@ -51,6 +51,30 @@ assert.equal(qualityLabel('something 4K remux.mp4'), '2160p')
 assert.equal(qualityLabel('holiday.mp4'), 'Source', 'no hint -> fallback')
 assert.equal(qualityLabel('holiday.mp4', 'Option 2'), 'Option 2', 'caller picks the fallback')
 assert.equal(qualityLabel('720pixels of nothing.mp4'), 'Source', 'not a bare resolution token')
+
+// music: both embeds are keyless, so a link is all there is to go on
+assert.equal(resolveSource('https://soundcloud.com/artist/some-track').kind, 'soundcloud')
+assert.equal(
+  resolveSource('https://soundcloud.com/artist/sets/an-album').source,
+  'https://soundcloud.com/artist/sets/an-album', 'playlists too')
+assert.equal(resolveSource('https://soundcloud.com/artist'), null, 'a profile is not a track')
+assert.equal(resolveSource('https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT').kind, 'spotify')
+assert.equal(
+  resolveSource('https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT?si=abc').source,
+  'track/4cOdK2wGLETKBW3PvgPWqT', 'the tracking parameter is dropped')
+assert.equal(
+  resolveSource('https://open.spotify.com/intl-de/album/4cOdK2wGLETKBW3PvgPWqT').source,
+  'album/4cOdK2wGLETKBW3PvgPWqT', 'localised links work')
+assert.equal(resolveSource('spotify:track:4cOdK2wGLETKBW3PvgPWqT').kind, 'spotify', 'and URIs')
+assert.equal(resolveSource('https://open.spotify.com/track/short'), null, 'ids are 22 chars')
+
+// friend codes are longer than party codes, and unique among those taken
+const takenCodes = new Set(['ABCDEF'])
+const fc = newUserCode(takenCodes)
+assert.equal(fc.length, 6)
+assert.ok(!takenCodes.has(fc))
+assert.ok([...fc].every((ch) => ALPHABET.includes(ch)), 'no letters that look like digits')
+assert.equal(pairKey('b', 'a'), pairKey('a', 'b'), 'a pair reads the same from either side')
 
 // holdingUp: who the room is waiting for
 const M = (o) => ({ online: true, approved: true, buf: 10, t: 100, skipped: false, ...o })

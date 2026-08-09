@@ -2,16 +2,16 @@ import { useEffect, useRef, useState } from 'react'
 import { BUF, syncAction } from '../../lib.js'
 import {
   Check, Copy, Crown, Gamepad2, Loader2, LogOut, Maximize2, Minimize2,
-  Pause, Play, Plus, Send, Settings, Shield, SkipForward, UserX, Volume2, X, Zap,
+  Pause, Play, Plus, Send, Settings, Shield, SkipForward, UserX, Users, Volume2, X, Zap,
 } from 'lucide-react'
 import { Avatar, Button, OwnerBadge, Signal, fmt, glare } from './ui.jsx'
-import { FilePlayer, YouTubePlayer, YT_LABEL } from './players.jsx'
+import { Player, YT_LABEL } from './players.jsx'
 import { SOUNDS, playSound } from './sfx.js'
 
 const CARD_MS = 4500
 const SPRING = 'ease-[cubic-bezier(.34,1.2,.64,1)]'
 
-export default function Room({ party }) {
+export default function Room({ party, onFriends, friendCount = 0 }) {
   const { room, you, youId, isOwner, chat, send } = party
   const video = useRef(null)
   const [focus, setFocus] = useState(false)
@@ -62,7 +62,9 @@ export default function Room({ party }) {
       if (gap > BUF.stray || (!heldForMe && gap > 3)) p.seek(room.t)
       return
     }
-    const { seek, rate } = syncAction(p.time(), room.t)
+    // SoundCloud and Spotify have no playback rate, so drift can only be fixed
+    // by seeking — which is cheap on a three-minute track and ruinous on a film.
+    const { seek, rate } = syncAction(p.time(), room.t, p.canRate?.() === false ? 2 : BUF.stray)
     if (seek !== null) p.seek(seek)
     p.rate(rate)
     // Autoplay needs a user gesture on most browsers. Rather than stopping the
@@ -95,6 +97,7 @@ export default function Room({ party }) {
     let lastT = -1
     let lastBuf = -1
     let wedged = 0
+    let refusing = 0
 
     const id = setInterval(() => {
       const p = video.current
@@ -125,7 +128,16 @@ export default function Room({ party }) {
         setTimeout(() => { p.seek(at); p.play().catch(() => {}) }, 400)
       }
 
-      send({ type: 'tick', t: now, buf, paused: p.isPaused(), focus })
+      // Some embeds report "playing" the instant they're asked and only then
+      // discover the browser won't allow it, so play() resolves and nothing
+      // happens. The only honest test is whether it is actually running.
+      refusing = phase === 'playing' && !paused && p.isPaused() ? refusing + 1 : 0
+      if (refusing >= 4 && !blocked) setBlocked('play')
+
+      // null, not 0, when the player genuinely doesn't know where it is yet —
+      // the room treats an unknown position as "don't wait for me".
+      const known = p.hasPosition?.() !== false
+      send({ type: 'tick', t: known ? now : null, buf, paused: p.isPaused(), focus })
     }, 1000)
     return () => clearInterval(id)
   }, [send])
@@ -222,20 +234,26 @@ export default function Room({ party }) {
           className={`shrink-0 overflow-hidden transition-all duration-500 ${SPRING}
             ${focus ? 'h-0 opacity-0 -translate-y-3' : 'h-16 opacity-100 translate-y-0'}`}
         >
-          <TopBar room={room} youId={youId} isOwner={isOwner} isHost={isHost} send={send} onLeave={() => setLeaving(true)} />
+          <TopBar
+            room={room} youId={youId} isOwner={isOwner} isHost={isHost} send={send}
+            onLeave={() => setLeaving(true)} onFriends={onFriends} friendCount={friendCount}
+          />
         </header>
 
         {/* video surface */}
         <div className="relative flex-1 min-h-0 bg-black" onPointerDown={poke}>
           {active ? (
-            active.kind === 'youtube' ? (
-              <YouTubePlayer key={active.id} ref={video} videoId={active.source} onDuration={setDuration} />
-            ) : (
-              <FilePlayer key={active.id} ref={video} src={active.source} onDuration={setDuration} />
-            )
+            <Player
+              key={active.id}
+              ref={video}
+              source={active}
+              onDuration={(d) => { setDuration(d); if (isHost) send({ type: 'duration', d }) }}
+            />
           ) : (
             <div className="absolute inset-0 grid place-items-center text-white/40 text-sm px-6 text-center">
-              {isHost ? 'Paste a YouTube or PixelDrain link above the chat to begin' : 'Waiting for the host to pick something…'}
+              {isHost
+                ? 'Paste a link above the chat — YouTube, PixelDrain, an .mp4, SoundCloud or Spotify'
+                : 'Waiting for the host to pick something…'}
             </div>
           )}
 
@@ -535,7 +553,7 @@ function CodeChip({ code }) {
   )
 }
 
-function TopBar({ room, youId, isOwner, isHost, send, onLeave }) {
+function TopBar({ room, youId, isOwner, isHost, send, onLeave, onFriends, friendCount = 0 }) {
   const [menu, setMenu] = useState(null) // member id whose actions are open
   const target = room.members.find((m) => m.id === menu)
 
@@ -613,6 +631,21 @@ function TopBar({ room, youId, isOwner, isHost, send, onLeave }) {
         <span className="text-xs text-white/40 shrink-0">
           {room.members.filter((m) => m.approved).length}/{room.cap}
         </span>
+
+        {/* Inviting or calling a friend into this party starts here. */}
+        <button
+          onClick={onFriends}
+          className="press relative shrink-0 grid place-items-center w-9 h-9 rounded-full bg-white/6 hover:bg-white/12 text-white/60"
+          title="Friends"
+          aria-label="Friends"
+        >
+          <Users size={16} />
+          {friendCount > 0 && (
+            <span className="absolute -top-1 -right-1 min-w-4 h-4 px-1 rounded-full bg-grass text-black text-[10px] font-bold grid place-items-center">
+              {friendCount}
+            </span>
+          )}
+        </button>
 
         <button
           onClick={onLeave}

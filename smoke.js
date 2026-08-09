@@ -612,6 +612,108 @@ async function readyParty(tag, cap = 4) {
   console.log('· joining mid-film does not wedge the room')
 }
 
+/* --------------------------------------------------------------- people *
+ * Parties are disposable; friends are not. All of this has to work with no
+ * party in sight, which is why `hello` exists.
+ * ----------------------------------------------------------------------- */
+{
+  const sign = async (tag, id, name) => {
+    const c = client(tag)
+    await c.ready
+    c.send({ type: 'hello', id, name })
+    const me = await c.wait((m) => m.type === 'me')
+    return { c, me: me.user }
+  }
+
+  const A = await sign('amir', 'user-a', 'Amir')
+  const B = await sign('bea', 'user-b', 'Bea')
+  assert.equal(A.me.code.length, 6, 'a friend code is six letters')
+  assert.notEqual(A.me.code, B.me.code, 'and unique')
+  assert.ok(A.me.key, 'and comes with a key for moving devices')
+
+  // Adding by code
+  A.c.send({ type: 'friendAdd', code: B.me.code })
+  const req = await B.c.wait((m) => m.type === 'friendreq', 5000, true)
+  assert.equal(req.from.name, 'Amir', 'the request names who sent it')
+  const bPending = await B.c.wait((m) => m.type === 'friends' && m.friends.some((f) => f.incoming), 5000, true)
+  assert.equal(bPending.friends[0].id, 'user-a')
+
+  B.c.send({ type: 'friendAccept', id: 'user-a' })
+  const aList = await A.c.wait((m) => m.type === 'friends' && m.friends[0]?.accepted, 5000, true)
+  assert.equal(aList.friends[0].online, true, 'and they can see each other online')
+  console.log('· friends: add by code, accept, presence')
+
+  // Private chat, and it survives being asked for again
+  A.c.send({ type: 'dm', id: 'user-b', text: 'you around?' })
+  const gotDm = await B.c.wait((m) => m.type === 'dm', 5000, true)
+  assert.equal(gotDm.msg.text, 'you around?')
+  assert.equal(gotDm.with, 'user-a', 'filed under the person, not the message')
+  B.c.send({ type: 'dmHistory', id: 'user-a' })
+  const hist = await B.c.wait((m) => m.type === 'dms', 5000, true)
+  assert.equal(hist.msgs.at(-1).text, 'you around?', 'history is kept')
+
+  // Strangers can't message
+  const { c: stranger } = await sign('cass', 'user-c', 'Cass')
+  stranger.send({ type: 'dm', id: 'user-a', text: 'hello?' })
+  const refused = await stranger.wait((m) => m.type === 'error', 4000)
+  assert.match(refused.error, /friends/i, 'you can only message friends')
+  console.log('· friends: private chat, history, and strangers refused')
+
+  // A call needs somewhere to land
+  A.c.send({ type: 'call', id: 'user-b' })
+  const noParty = await A.c.wait((m) => m.type === 'error', 4000, true)
+  assert.match(noParty.error, /party/i, 'calling without a party says so')
+
+  A.c.send({ type: 'create', id: 'user-a', name: 'Amir', cap: 4 })
+  const aRoom = await A.c.wait((m) => m.type === 'joined', 5000, true)
+  const inParty = await B.c.wait(
+    (m) => m.type === 'friends' && m.friends[0]?.party === aRoom.room.code, 6000, true)
+  assert.ok(inParty, 'friends can see which party you are in')
+
+  // …and answering walks you into it. No audio anywhere in this.
+  A.c.send({ type: 'call', id: 'user-b' })
+  const ringing = await B.c.wait((m) => m.type === 'ring', 5000, true)
+  assert.equal(ringing.code, aRoom.room.code, 'the ring carries the party')
+  B.c.send({ type: 'callAnswer', callId: ringing.callId })
+  const landed = await B.c.wait((m) => m.type === 'calljoin', 5000, true)
+  assert.equal(landed.code, aRoom.room.code)
+  // Not `fresh`: the caller is told before the answerer is, so it has already
+  // landed by the time we start listening.
+  await A.c.wait((m) => m.type === 'callend' && m.reason === 'answered', 5000)
+
+  // `calljoin` is an instruction to the client; this is what the real one does.
+  B.c.send({ type: 'join', code: landed.code, id: 'user-b', name: 'Bea' })
+  const seated = await B.c.wait((m) => m.type === 'joined', 6000, true)
+  assert.equal(seated.room.code, aRoom.room.code)
+  const bea = await B.c.wait(
+    (m) => m.type === 'state' && m.room.members.find((x) => x.id === 'user-b')?.approved, 6000, true)
+  assert.ok(bea, 'and they walk straight in — the host rang them, they are not queueing')
+  console.log('· friends: call rings, answering joins the party')
+
+  // Declining ends it for both
+  A.c.send({ type: 'call', id: 'user-c' })
+  const notFriend = await A.c.wait((m) => m.type === 'error', 4000, true)
+  assert.match(notFriend.error, /friends/i, 'you can only call friends')
+
+  // Invites are the quiet version
+  A.c.send({ type: 'invite', id: 'user-b' })
+  const inv = await B.c.wait((m) => m.type === 'invite', 5000, true)
+  assert.equal(inv.code, aRoom.room.code)
+
+  // Moving to a new device
+  const fresh = client('newphone')
+  await fresh.ready
+  fresh.send({ type: 'restore', code: A.me.code, key: A.me.key })
+  const back = await fresh.wait((m) => m.type === 'restored', 5000, true)
+  assert.equal(back.user.id, 'user-a', 'the code and key hand back the same identity')
+  fresh.send({ type: 'restore', code: A.me.code, key: 'WRONGKEY00' })
+  const denied = await fresh.wait((m) => m.type === 'error', 4000, true)
+  assert.match(denied.error, /do not match/i, 'and a wrong key does not')
+  console.log('· friends: invites, and an identity that moves between devices')
+
+  A.c.ws.close(); B.c.ws.close(); stranger.ws.close(); fresh.ws.close()
+}
+
 // 32. Nothing under /api may answer with the SPA's index.html — the app parses
 // JSON, and "Unexpected token '<'" is a terrible way to learn a URL is wrong.
 {

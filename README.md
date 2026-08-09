@@ -101,6 +101,29 @@ separate layouts for a phone upright, a phone on its side, and a tablet. See
 cd android-app && npm install && npm run apk
 ```
 
+## Friends
+
+Parties are disposable; people are not. A room lives for an evening, so it lives
+in memory with the database as a parachute — a friend list has to survive the
+browser closing, the app being reinstalled and this server being redeployed, so
+all of that *is* the database.
+
+Still no accounts and no passwords. Identity is the random id the client
+generated for itself the first time it ran. `code` is the shareable half — six
+letters, because a party code gets shouted across a room and dies in an hour
+while this one is typed once and kept — and `key` is the private half that
+reclaims the same identity on a new phone.
+
+| Thing | How |
+| --- | --- |
+| Presence | Every client says `hello` the moment it connects, party or not. Without that the server didn't know a socket existed until it was in a room, so nothing could reach anyone sitting in the lobby. |
+| Adding | By code. Asking someone who already asked you counts as accepting. |
+| Private chat | Kept per pair, last 200 messages, and only between people who have accepted each other. |
+| Seeing them | Their list shows who is online and which party they're in, so joining is one tap rather than a code read out loud. |
+| Invite | A card that waits. |
+| Call | The same thing, ringing, with a 45-second life. Answering walks you straight into the caller's party — **there is no audio anywhere in this**; the point is that ringing someone is a much faster way to get them watching than typing a code at them. |
+| Skipping the door | Someone a *host* called or invited walks straight in. They already said yes by ringing. An ordinary member inviting a friend still puts them in the queue. |
+
 ## The game and the soundboard
 
 `web/public/game/` is a self-contained Three.js/Cannon.js block-stacker, offered
@@ -136,6 +159,16 @@ The accent colour in `index.css` is sampled from the logo so the two match.
 | --- | --- |
 | YouTube (`watch?v=`, `youtu.be`, `/shorts/`, `/embed/`, `/live/`) | YouTube's own player is embedded and driven through the IFrame API. The bytes never touch this server, so it costs nothing to run. |
 | PixelDrain, direct `.mp4`/`.webm` | Played in our own `<video>`, streamed through us when the host blocks hotlinking. |
+| SoundCloud track or set | The public widget at `w.soundcloud.com/player`, driven through its Widget API. No key, no token, no registered application. |
+| Spotify track, album, playlist or episode | The public embed, driven through Spotify's IFrame API. Also keyless — see the limits below for what that costs. |
+
+Music players are stitched into the same room clock as everything else, with two
+differences that follow from what the embeds can actually do. Neither supports a
+playback rate, so drift is corrected by seeking — cheap on a three-minute track,
+ruinous on a two-hour film. And neither ever holds the room up: a SoundCloud
+widget ignores `seekTo` while paused and reports nothing at all until it has
+played once, so a room that stopped to wait for one would wait forever, and
+there is nothing a stopped widget could do with the time anyway.
 
 Both sit behind one small player interface (`web/src/players.jsx`), so the room
 clock, straggler detection, countdown and controls are written once.
@@ -151,6 +184,12 @@ clock, straggler detection, countdown and controls are written once.
   (`getPlaybackQuality`, polled) and offers YouTube's own controls, whose gear
   menu is the one place a choice sticks. File sources are unaffected — those are
   real alternate links and switching between them works.
+- **Spotify plays 30-second previews.** The keyless embed gives a full track only
+  to a viewer already logged into Spotify in that same browser, and inside the
+  Android WebView nobody is. Using the real thing needs OAuth, a registered
+  application and a Premium account per viewer — which is exactly the "token and
+  developer thing" this deliberately avoids. SoundCloud has no such catch and is
+  the one to reach for.
 - **Not every YouTube video can be embedded.** Uploaders can disable embedding,
   and age-restricted or region-locked videos will refuse to play.
 - **Ads are per-viewer.** If someone gets a pre-roll they fall behind and the

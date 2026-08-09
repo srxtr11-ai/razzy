@@ -1,12 +1,14 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { DoorClosed, Loader2, WifiOff } from 'lucide-react'
 import { useParty } from './api.js'
 import Lobby from './screens/Lobby.jsx'
 import Room from './screens/Room.jsx'
+import Friends, { CallOverlay, InviteCards } from './Friends.jsx'
 import { Button } from './components/ui.jsx'
 
 export default function App() {
   const party = useParty()
+  const [friendsOpen, setFriendsOpen] = useState(false)
 
   useEffect(() => {
     if (!party.error) return
@@ -14,10 +16,19 @@ export default function App() {
     return () => clearTimeout(t)
   }, [party.error]) // eslint-disable-line
 
-  // Android's back button should back out of the app, not navigate the WebView
-  // to a blank history entry.
+  // Answering a call lands you in a party; the drawer has done its job.
+  useEffect(() => { if (party.room) setFriendsOpen(false) }, [party.room?.code]) // eslint-disable-line
+
+  // Android's back button should close what's open, then back out of the app —
+  // never navigate the WebView to a blank history entry.
   useEffect(() => {
     const onBack = (e) => {
+      if (friendsOpen) {
+        e.preventDefault?.()
+        setFriendsOpen(false)
+        history.pushState(null, '', location.href)
+        return
+      }
       if (!party.room) return
       e.preventDefault?.()
       history.pushState(null, '', location.href)
@@ -25,7 +36,30 @@ export default function App() {
     history.pushState(null, '', location.href)
     window.addEventListener('popstate', onBack)
     return () => window.removeEventListener('popstate', onBack)
-  }, [party.room])
+  }, [party.room, friendsOpen])
+
+  const pending = party.friends.filter((f) => f.incoming).length
+
+  /** A call has to reach you wherever you are, so this sits above every screen. */
+  const social = (
+    <>
+      <InviteCards party={party} />
+      <CallOverlay party={party} />
+      <div
+        className={`fixed inset-0 z-[88] transition-transform duration-300 ${
+          friendsOpen ? 'translate-x-0' : 'translate-x-full pointer-events-none'
+        }`}
+        style={{ transitionTimingFunction: 'var(--ease-spring)' }}
+      >
+        <div
+          className="h-full glass-solid"
+          style={{ paddingTop: 'var(--top)', paddingBottom: 'var(--bottom)' }}
+        >
+          <Friends party={party} onClose={() => setFriendsOpen(false)} />
+        </div>
+      </div>
+    </>
+  )
 
   if (party.declined) {
     return (
@@ -37,23 +71,34 @@ export default function App() {
     )
   }
 
-  if (!party.room) return <Lobby party={party} />
+  if (!party.room) {
+    return (
+      <>
+        <Lobby party={party} onFriends={() => setFriendsOpen(true)} friendCount={pending} />
+        {social}
+      </>
+    )
+  }
 
   if (!party.you?.approved) {
     return (
-      <Centre>
-        <div className="text-4xl font-bold tracking-[0.3em] text-grass">{party.room.code}</div>
-        <p className="text-white/50 text-sm flex items-center justify-center gap-2">
-          <Loader2 size={14} className="animate-spin" />
-          Asking the host to let you in…
-        </p>
-      </Centre>
+      <>
+        <Centre>
+          <div className="text-4xl font-bold tracking-[0.3em] text-grass">{party.room.code}</div>
+          <p className="text-white/50 text-sm flex items-center justify-center gap-2">
+            <Loader2 size={14} className="animate-spin" />
+            Asking the host to let you in…
+          </p>
+        </Centre>
+        {social}
+      </>
     )
   }
 
   return (
     <>
-      <Room party={party} />
+      <Room party={party} onFriends={() => setFriendsOpen(true)} friendCount={pending} />
+      {social}
       {party.error && (
         <div
           className="fixed left-1/2 -translate-x-1/2 z-[90] glass rounded-full px-5 h-11 grid place-items-center text-sm text-red-300 pop"

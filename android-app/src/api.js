@@ -44,14 +44,49 @@ export const api = {
 }
 
 /**
- * Hide or restore the system bars. The Fullscreen API does nothing useful in a
- * Capacitor WebView, so "Full screen" has to ask the activity directly —
- * without this the notification bar sits on top of the film. Harmlessly absent
- * when the same code runs in a browser.
+ * Avatars are stored as `/avatars/x.jpg`, which resolves against the server on
+ * the website and against `capacitor://localhost` in here — where it is nothing
+ * at all. Anyone who joined from a browser had a broken picture in the app. Fix
+ * it once, on the way in, rather than at every place one is drawn.
  */
+const absolutise = (o) => (o && o.avatar ? { ...o, avatar: api.media(o.avatar) } : o)
+const absolutiseAll = (list) => (Array.isArray(list) ? list.map(absolutise) : list)
+
+/**
+ * The handful of things only the Android shell can do. All no-ops in a browser,
+ * so the same code runs in `npm run dev` without a special case.
+ */
+const native = () => (typeof window !== 'undefined' ? window.RazzyNative : null)
+
+/** Hide or restore the system bars — the Fullscreen API is a no-op in a WebView. */
 export const immersive = (on) => {
-  try { window.RazzyNative?.setImmersive?.(!!on) } catch {}
+  try { native()?.setImmersive?.(!!on) } catch {}
 }
+
+/**
+ * Hold the process open while a party is running. Android otherwise freezes a
+ * backgrounded app, which kills the socket, drifts playback out of sync and
+ * means a friend's call never arrives.
+ */
+export const keepAlive = (on, code = '') => {
+  try { native()?.setKeepAlive?.(!!on, code) } catch {}
+}
+
+// Notification ids have to be numbers and have to be stable, so that a second
+// message from the same person replaces the first instead of stacking.
+const noteId = (s) => {
+  let h = 0
+  for (let i = 0; i < String(s).length; i++) h = (h * 31 + String(s).charCodeAt(i)) | 0
+  return Math.abs(h) % 100000
+}
+
+export const notify = (tag, title, body, urgent = false) => {
+  try { native()?.notify?.(noteId(tag), String(title), String(body), !!urgent) } catch {}
+}
+export const clearNote = (tag) => {
+  try { native()?.cancelNote?.(noteId(tag)) } catch {}
+}
+export const hasShell = () => !!native()
 
 /* ------------------------------------------------------------- identity */
 
@@ -94,6 +129,14 @@ export function useParty() {
   const [connected, setConnected] = useState(false)
   const [declined, setDeclined] = useState(false)
 
+  // People, as opposed to parties. These outlive any room.
+  const [me, setMe] = useState(() => ls.get('razzy.me', null))
+  const [friends, setFriends] = useState([])
+  const [threads, setThreads] = useState({})
+  const [ring, setRing] = useState(null)
+  const [calling, setCalling] = useState(null)
+  const [invites, setInvites] = useState([])
+
   const ws = useRef(null)
   const intent = useRef(null)
   const inRoom = useRef(false)
@@ -105,6 +148,18 @@ export function useParty() {
     if (ws.current?.readyState === 1) ws.current.send(JSON.stringify(msg))
   }, [])
 
+  const withMembers = (r) => (r ? { ...r, members: absolutiseAll(r.members) } : r)
+
+  /**
+   * Notify only when the app isn't the thing you're looking at. A notification
+   * for a message already on screen is noise, and this app's whole complaint
+   * history is about noise.
+   */
+  const away = (tag, title, body) => {
+    if (document.visibilityState === 'visible') return
+    notify(tag, title, body, false)
+  }
+
   const open = useCallback(() => {
     let sock
     try { sock = new WebSocket(api.wsUrl()) } catch { return }
@@ -112,6 +167,9 @@ export function useParty() {
 
     sock.onopen = () => {
       setConnected(true)
+      // Who we are, before anything else — presence, friend requests and calls
+      // all have to reach a phone sitting in the lobby.
+      sock.send(JSON.stringify({ type: 'hello', ...identity() }))
       if (!intent.current) {
         const code = lastParty.get()
         if (code) intent.current = { type: 'join', code, ...identity() }
@@ -131,17 +189,71 @@ export function useParty() {
       if (m.type === 'sfx') return onSfx.current(m)
       if (m.type === 'joined') {
         setYouId(m.you)
-        setRoom(m.room)
-        setChat(m.chat || [])
+        setRoom(withMembers(m.room))
+        setChat(absolutiseAll(m.chat || []))
         intent.current = { type: 'join', code: m.room.code, ...identity(), id: m.you }
         lastParty.set(m.room.code)
         inRoom.current = true
         return
       }
-      if (m.type === 'state') return setRoom(m.room)
+      if (m.type === 'state') return setRoom(withMembers(m.room))
       if (m.type === 'chat') {
-        setChat((c) => [...c.slice(-199), m.msg])
+        setChat((c) => [...c.slice(-199), absolutise(m.msg)])
         onChat.current(m.msg)
+        return
+      }
+
+      /* --- people ---------------------------------------------------- */
+      if (m.type === 'me' || m.type === 'restored') {
+        const user = absolutise(m.user)
+        ls.set('razzy.me', user)
+        setMe(user)
+        if (m.type === 'restored') {
+          ls.set('razzy.id', user.id)
+          ls.set('razzy.name', user.name)
+          if (user.avatar) ls.set('razzy.avatar', user.avatar)
+          location.reload()
+        }
+        return
+      }
+      if (m.type === 'friends') return setFriends(absolutiseAll(m.friends))
+      if (m.type === 'dms') return setThreads((t) => ({ ...t, [m.with]: m.msgs }))
+      if (m.type === 'dm') {
+        setThreads((t) => ({ ...t, [m.with]: [...(t[m.with] || []), m.msg].slice(-200) }))
+        if (m.msg.from !== identity().id) away(`dm-${m.msg.from}`, m.msg.name, m.msg.text)
+        return
+      }
+      if (m.type === 'friendreq') {
+        away(`req-${m.from.id}`, m.from.name, 'wants to be friends')
+        return
+      }
+      if (m.type === 'friendok') {
+        away(`req-${m.from.id}`, m.from.name, 'accepted your friend request')
+        return
+      }
+      if (m.type === 'invite') {
+        setInvites((v) => [...v.filter((x) => x.from.id !== m.from.id), m])
+        away(`inv-${m.from.id}`, m.from.name, `invited you to party ${m.code}`)
+        return
+      }
+      if (m.type === 'ring') {
+        setRing(m)
+        // Urgent: this one is allowed to interrupt whatever you're doing.
+        notify(`call-${m.callId}`, m.from.name, 'is calling you into a party', true)
+        return
+      }
+      if (m.type === 'calling') return setCalling(m)
+      if (m.type === 'callend') {
+        clearNote(`call-${m.callId}`)
+        setRing((r) => (r?.callId === m.callId ? null : r))
+        setCalling((c) => (c?.callId === m.callId ? null : c))
+        return
+      }
+      if (m.type === 'calljoin') {
+        clearNote(`call-${m.callId}`)
+        setRing(null)
+        intent.current = { type: 'join', code: m.code, ...identity() }
+        sock.send(JSON.stringify(intent.current))
         return
       }
       if (m.type === 'left') {
@@ -219,6 +331,12 @@ export function useParty() {
   const you = room?.members.find((m) => m.id === youId) || null
   const isOwner = !!room && room.ownerId === youId
 
+  // Being in a party is what earns the process the right to stay alive.
+  useEffect(() => {
+    keepAlive(!!room, room?.code || '')
+    return () => keepAlive(false)
+  }, [room?.code]) // eslint-disable-line
+
   return {
     room, you, youId, isOwner,
     isHost: isOwner || !!you?.coHost,
@@ -226,6 +344,30 @@ export function useParty() {
     onChatMessage: (fn) => { onChat.current = fn },
     onSound: (fn) => { onSfx.current = fn },
     send, create, join,
+
+    /* people */
+    me, friends, threads, ring, calling, invites,
+    openThread: (id) => send({ type: 'dmHistory', id }),
+    sendDm: (id, text) => send({ type: 'dm', id, text }),
+    addFriend: (code) => send({ type: 'friendAdd', code }),
+    acceptFriend: (id) => send({ type: 'friendAccept', id }),
+    removeFriend: (id) => send({ type: 'friendRemove', id }),
+    invite: (id) => send({ type: 'invite', id }),
+    call: (id) => send({ type: 'call', id }),
+    answerCall: (callId) => send({ type: 'callAnswer', callId }),
+    declineCall: (callId) => send({ type: 'callDecline', callId }),
+    cancelCall: (callId) => send({ type: 'callCancel', callId }),
+    dismissInvite: (id) => setInvites((v) => v.filter((x) => x.from.id !== id)),
+    restore: (code, key) => send({ type: 'restore', code, key }),
+    /** Friends see this name before you've joined anything, so don't make them wait. */
+    setProfile: (name, avatar) => {
+      remember(name, avatar)
+      send({ type: 'hello', ...identity() })
+    },
+    joinCode: (code) => {
+      intent.current = { type: 'join', code, ...identity() }
+      send(intent.current)
+    },
   }
 }
 

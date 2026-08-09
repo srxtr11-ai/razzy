@@ -78,6 +78,25 @@ textarea {
   box-shadow: inset 0 0 0 1px var(--glass-border);
 }
 
+/* The friends panel is the website's component, verbatim, so that the two can't
+   drift apart. It asks for the website's class names; here they mean the same
+   things, they're just called something else. */
+.liquid {
+  background: var(--glass-bg);
+  backdrop-filter: blur(18px) saturate(160%);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
+  box-shadow: inset 0 1px 1px -1px var(--glass-highlight), inset 0 0 0 1px var(--glass-border);
+}
+.card-in { animation: pop 0.34s var(--ease-spring); }
+
+@media (prefers-reduced-transparency: reduce), (update: slow) {
+  .liquid {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: #101318;
+  }
+}
+
 @media (prefers-reduced-transparency: reduce), (update: slow) {
   .glass {
     backdrop-filter: none;

@@ -259,3 +259,239 @@ export const YouTubePlayer = forwardRef(function YouTubePlayer({ videoId, onDura
     </div>
   )
 })
+
+/**
+ * Picks the engine for a source, so both clients agree on what plays what and
+ * neither has to grow a branch every time a service is added. `media` lets the
+ * Android build turn a proxied path into an absolute URL.
+ */
+export const Player = forwardRef(function Player({ source, media, onDuration }, ref) {
+  if (!source) return null
+  if (source.kind === 'youtube') return <YouTubePlayer ref={ref} videoId={source.source} onDuration={onDuration} />
+  if (source.kind === 'soundcloud') return <SoundCloudPlayer ref={ref} url={source.source} onDuration={onDuration} />
+  if (source.kind === 'spotify') return <SpotifyPlayer ref={ref} source={source.source} onDuration={onDuration} />
+  return <FilePlayer ref={ref} src={media ? media(source.source) : source.source} onDuration={onDuration} />
+})
+
+/* --------------------------------------------------------------- music */
+
+/**
+ * SoundCloud and Spotify both hand out an embed that needs no key, no token and
+ * no registered application — which is the only reason they're here. Both also
+ * answer questions asynchronously, through callbacks and events, while the sync
+ * loop needs `time()` to return a number right now. So both keep a small mirror
+ * of the player's state, refreshed by events and by a poll, and the getters read
+ * the mirror.
+ *
+ * Neither supports a playback rate, so `canRate()` is false and drift gets
+ * corrected by seeking — which is fine here, where a track is a few megabytes
+ * rather than a two-hour film.
+ */
+
+const scripts = new Map()
+
+/** Load a third-party script once, and wait until it has actually announced itself. */
+function loadScript(src, ready) {
+  if (!scripts.has(src)) {
+    scripts.set(src, new Promise((resolve) => {
+      if (ready()) return resolve(true)
+      const s = document.createElement('script')
+      s.src = src
+      s.onload = () => {
+        // onload only means "parsed" — several of these publish their API a tick
+        // later, or through a global callback.
+        const wait = setInterval(() => { if (ready()) { clearInterval(wait); resolve(true) } }, 50)
+        setTimeout(() => { clearInterval(wait); resolve(!!ready()) }, 8000)
+      }
+      s.onerror = () => resolve(false)
+      document.head.appendChild(s)
+    }))
+  }
+  return scripts.get(src)
+}
+
+/**
+ * Spotify hands its API to a global callback rather than exposing it, so the
+ * hook has to be in place before the script is fetched.
+ */
+function loadSpotify() {
+  if (!window.__razzySpotifyHook) {
+    window.__razzySpotifyHook = true
+    const prev = window.onSpotifyIframeApiReady
+    window.onSpotifyIframeApiReady = (api) => { window.__razzySpotify = api; prev?.(api) }
+  }
+  return loadScript('https://open.spotify.com/embed/iframe-api/v1', () => window.__razzySpotify)
+}
+
+export const SoundCloudPlayer = forwardRef(function SoundCloudPlayer({ url, onDuration }, ref) {
+  const frame = useRef(null)
+  const widget = useRef(null)
+  const at = useRef(0)
+  const dur = useRef(0)
+  const paused = useRef(true)
+
+  useEffect(() => {
+    let dead = false
+    let poll
+    loadScript('https://w.soundcloud.com/player/api.js', () => window.SC?.Widget).then(() => {
+      if (dead || !frame.current || !window.SC?.Widget) return
+      const w = window.SC.Widget(frame.current)
+      widget.current = w
+      const E = window.SC.Widget.Events
+      w.bind(E.READY, () => {
+        w.getDuration((ms) => { dur.current = (ms || 0) / 1000; onDuration?.(dur.current) })
+      })
+      w.bind(E.PLAY, () => { paused.current = false })
+      w.bind(E.PAUSE, () => { paused.current = true })
+      w.bind(E.FINISH, () => { paused.current = true })
+      w.bind(E.PLAY_PROGRESS, (e) => { at.current = (e?.currentPosition || 0) / 1000 })
+      // PLAY_PROGRESS stops while paused, and a seek made while paused would
+      // otherwise never be reflected — so ask directly as well.
+      poll = setInterval(() => {
+        try {
+          w.getPosition((ms) => { at.current = (ms || 0) / 1000 })
+          w.isPaused((p) => { paused.current = !!p })
+        } catch {}
+      }, 500)
+    })
+    return () => { dead = true; clearInterval(poll); widget.current = null }
+  }, [url]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const started = (ms) =>
+    new Promise((resolve, reject) => {
+      const w = widget.current
+      if (!w) return reject()
+      w.play()
+      const from = Date.now()
+      const check = setInterval(() => {
+        if (!paused.current) { clearInterval(check); resolve() }
+        else if (Date.now() - from > ms) { clearInterval(check); reject() }
+      }, 120)
+    })
+
+  useImperativeHandle(ref, () => ({
+    // A cold widget takes a few seconds to get going; a short window here just
+    // means falling back to muted playback for no reason.
+    play: () => { try { widget.current?.setVolume(100) } catch {} ; return started(5000) },
+    playMuted: () => { try { widget.current?.setVolume(0) } catch {} ; return started(5000) },
+    unmute: () => { try { widget.current?.setVolume(100) } catch {} },
+    pause: () => { try { widget.current?.pause() } catch {} },
+    seek: (t) => { try { widget.current?.seekTo(Math.max(0, t) * 1000); at.current = t } catch {} },
+    time: () => at.current,
+    duration: () => dur.current,
+    ready: () => (widget.current ? 4 : 0),
+    buffered: () => PLENTY, // not measurable, and a track is small enough not to matter
+    loading: () => true,
+    isPaused: () => paused.current,
+    /**
+     * Never report a position to the room.
+     *
+     * A SoundCloud widget ignores `seekTo` while it is paused, and won't report
+     * anything at all until it has played once. So a widget that starts a few
+     * seconds late looks far behind, the room stops to wait for it — and a
+     * stopped widget can neither seek nor start. It waits forever.
+     *
+     * Waiting for a music player is pointless anyway: there is nothing it can do
+     * while stopped. So it never holds the room up. The room clock just runs, the
+     * track runs alongside it, and any drift is corrected by a seek during
+     * playback, which does work.
+     */
+    hasPosition: () => false,
+    canRate: () => false,
+    rate: () => {},
+    quality: () => 'auto',
+    reload: () => { try { widget.current?.seekTo(at.current * 1000); widget.current?.play() } catch {} },
+  }), [])
+
+  return (
+    <div className="absolute inset-0 bg-black">
+      <iframe
+        ref={frame}
+        title="SoundCloud"
+        className="w-full h-full border-0"
+        allow="autoplay"
+        src={`https://w.soundcloud.com/player/?url=${encodeURIComponent(url)}&auto_play=false&hide_related=true&show_comments=false&show_teaser=false&visual=true&color=%2322c55e`}
+      />
+    </div>
+  )
+})
+
+export const SpotifyPlayer = forwardRef(function SpotifyPlayer({ source, onDuration }, ref) {
+  const host = useRef(null)
+  const ctrl = useRef(null)
+  const at = useRef(0)
+  const dur = useRef(0)
+  const paused = useRef(true)
+
+  useEffect(() => {
+    let dead = false
+    const mount = document.createElement('div')
+    host.current?.appendChild(mount)
+
+    loadSpotify().then(() => {
+      if (dead || !window.__razzySpotify) return
+      window.__razzySpotify.createController(
+        mount,
+        { uri: `spotify:${source.replace('/', ':')}`, width: '100%', height: '100%' },
+        (controller) => {
+          if (dead) { try { controller.destroy() } catch {} ; return }
+          ctrl.current = controller
+          controller.addListener('playback_update', (e) => {
+            const d = e?.data || {}
+            at.current = (d.position || 0) / 1000
+            if (d.duration) {
+              const secs = d.duration / 1000
+              if (secs !== dur.current) { dur.current = secs; onDuration?.(secs) }
+            }
+            paused.current = !!d.isPaused
+          })
+        }
+      )
+    })
+    return () => {
+      dead = true
+      try { ctrl.current?.destroy() } catch {}
+      ctrl.current = null
+      if (host.current) host.current.innerHTML = ''
+    }
+  }, [source]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const started = (ms) =>
+    new Promise((resolve, reject) => {
+      const c = ctrl.current
+      if (!c) return reject()
+      try { c.resume() } catch { try { c.play() } catch {} }
+      const from = Date.now()
+      const check = setInterval(() => {
+        if (!paused.current) { clearInterval(check); resolve() }
+        else if (Date.now() - from > ms) { clearInterval(check); reject() }
+      }, 150)
+    })
+
+  useImperativeHandle(ref, () => ({
+    play: () => started(2500),
+    // No volume control on the embed, so there is no muted fallback to offer —
+    // if the browser refuses to start it, only a tap will do.
+    playMuted: () => Promise.reject(),
+    unmute: () => {},
+    pause: () => { try { ctrl.current?.pause() } catch {} },
+    seek: (t) => { try { ctrl.current?.seek(Math.max(0, t)); at.current = t } catch {} },
+    time: () => at.current,
+    duration: () => dur.current,
+    ready: () => (ctrl.current ? 4 : 0),
+    buffered: () => PLENTY,
+    loading: () => true,
+    isPaused: () => paused.current,
+    hasPosition: () => false, // see the SoundCloud note above — same reasoning
+    canRate: () => false,
+    rate: () => {},
+    quality: () => 'auto',
+    reload: () => { try { ctrl.current?.seek(at.current); ctrl.current?.resume() } catch {} },
+  }), [])
+
+  return (
+    <div className="absolute inset-0 bg-black grid place-items-center">
+      <div ref={host} className="w-full h-full max-w-2xl" />
+    </div>
+  )
+})

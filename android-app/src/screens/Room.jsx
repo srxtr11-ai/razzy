@@ -2,16 +2,16 @@ import { useEffect, useRef, useState } from 'react'
 import { BUF, syncAction } from '../../../lib.js'
 import {
   Check, Crown, Gamepad2, Loader2, LogOut, Maximize2, MessageCircle, Minimize2, Pause, Play,
-  Send, Settings, Shield, SkipForward, UserX, Volume2, X, Zap,
+  Send, Settings, Shield, SkipForward, UserX, Users, Volume2, X, Zap,
 } from 'lucide-react'
 import { api, immersive } from '../api.js'
-import { FilePlayer, YouTubePlayer, YT_LABEL } from '../components/players.jsx'
+import { Player, YT_LABEL } from '../components/players.jsx'
 import { SOUNDS, playSound } from '../sfx.js'
 import { Avatar, Button, CoHostBadge, OwnerBadge, Signal, fmt, useKeyboardInset, useLayout } from '../components/ui.jsx'
 
 const CARD_MS = 4500
 
-export default function Room({ party }) {
+export default function Room({ party, onFriends, friendCount = 0 }) {
   const { room, you, youId, isOwner, isHost, chat, send } = party
   const layout = useLayout()
   const kb = useKeyboardInset()
@@ -70,7 +70,9 @@ export default function Room({ party }) {
       if (gap > BUF.stray || (!heldForMe && gap > 3)) p.seek(room.t)
       return
     }
-    const { seek, rate } = syncAction(p.time(), room.t)
+    // SoundCloud and Spotify have no playback rate, so drift can only be fixed
+    // by seeking — cheap on a three-minute track, ruinous on a film.
+    const { seek, rate } = syncAction(p.time(), room.t, p.canRate?.() === false ? 2 : BUF.stray)
     if (seek !== null) p.seek(seek)
     p.rate(rate)
     if (p.isPaused()) {
@@ -98,6 +100,7 @@ export default function Room({ party }) {
     let lastT = -1
     let lastBuf = -1
     let wedged = 0
+    let refusing = 0
 
     const id = setInterval(() => {
       const p = player.current
@@ -124,7 +127,16 @@ export default function Room({ party }) {
         setTimeout(() => { p.seek(at); p.play().catch(() => {}) }, 400)
       }
 
-      send({ type: 'tick', t: now, buf, paused: p.isPaused(), focus: full })
+      // Some embeds report "playing" the instant they're asked and only then
+      // discover the browser won't allow it. The only honest test is whether it
+      // is actually running.
+      refusing = phase === 'playing' && !paused && p.isPaused() ? refusing + 1 : 0
+      if (refusing >= 4 && !blocked) setBlocked('play')
+
+      // null, not 0, when the player doesn't know where it is yet — see the
+      // SoundCloud note in players.jsx.
+      const known = p.hasPosition?.() !== false
+      send({ type: 'tick', t: known ? now : null, buf, paused: p.isPaused(), focus: full })
     }, 1000)
     return () => clearInterval(id)
   }, [send])
@@ -225,6 +237,8 @@ export default function Room({ party }) {
             room={room} members={members} youId={youId} isOwner={isOwner} isHost={isHost}
             onMember={(id) => isHost && id !== youId && setMenu(id)}
             onLeave={() => setLeaving(true)}
+            onFriends={onFriends}
+            friendCount={friendCount}
             compact={layout.short}
           />
         )}
@@ -237,14 +251,18 @@ export default function Room({ party }) {
           onPointerDown={poke}
         >
           {activeSrc ? (
-            activeSrc.kind === 'youtube' ? (
-              <YouTubePlayer key={activeSrc.id} ref={player} videoId={activeSrc.source} onDuration={setDuration} />
-            ) : (
-              <FilePlayer key={activeSrc.id} ref={player} src={api.media(activeSrc.source)} onDuration={setDuration} />
-            )
+            <Player
+              key={activeSrc.id}
+              ref={player}
+              source={activeSrc}
+              media={api.media}
+              onDuration={(d) => { setDuration(d); if (isHost) send({ type: 'duration', d }) }}
+            />
           ) : (
             <div className="absolute inset-0 grid place-items-center text-white/40 text-sm px-6 text-center">
-              {isHost ? 'Paste a link below to begin' : 'Waiting for the host to pick something…'}
+              {isHost
+                ? 'Paste a link above the chat — YouTube, PixelDrain, an .mp4, SoundCloud or Spotify'
+                : 'Waiting for the host to pick something…'}
             </div>
           )}
 
@@ -453,7 +471,7 @@ export default function Room({ party }) {
 
 /* --------------------------------------------------------------- pieces */
 
-function TopBar({ room, members, youId, isOwner, isHost, onMember, onLeave, compact }) {
+function TopBar({ room, members, youId, isOwner, isHost, onMember, onLeave, onFriends, friendCount = 0, compact }) {
   const [copied, setCopied] = useState(false)
   const size = compact ? 28 : 34
   return (
@@ -485,6 +503,20 @@ function TopBar({ room, members, youId, isOwner, isHost, onMember, onLeave, comp
         </div>
 
         <span className="text-[11px] text-white/35 shrink-0 tabular-nums">{members.length}/{room.cap}</span>
+        {/* Calling or inviting a friend into this party starts here. */}
+        <button
+          onClick={onFriends}
+          className="press relative shrink-0 grid place-items-center rounded-xl bg-white/6 text-white/60"
+          style={{ width: 40, height: 40 }}
+          aria-label="Friends"
+        >
+          <Users size={16} />
+          {friendCount > 0 && (
+            <span className="absolute -top-1 -right-1 min-w-4 h-4 px-1 rounded-full bg-grass text-black text-[10px] font-bold grid place-items-center">
+              {friendCount}
+            </span>
+          )}
+        </button>
         <button
           onClick={onLeave}
           className="press shrink-0 grid place-items-center rounded-xl bg-white/6 text-white/60"

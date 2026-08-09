@@ -13,6 +13,44 @@ export function newCode(taken = new Set()) {
 }
 
 /**
+ * A person's code, as opposed to a party's.
+ *
+ * Six letters rather than three: a party code is shouted across a room and dies
+ * in an hour, a friend code is typed once and kept forever, so collisions matter
+ * far more than brevity. 24^6 is about 191 million.
+ */
+export function newUserCode(taken = new Set()) {
+  for (let i = 0; i < 800; i++) {
+    let c = ''
+    for (let j = 0; j < 6; j++) c += ALPHABET[Math.floor(Math.random() * ALPHABET.length)]
+    if (!taken.has(c)) return c
+  }
+  throw new Error('no free friend codes')
+}
+
+/** Pair key for anything held between two people — same value from either side. */
+export const pairKey = (a, b) => (a < b ? `${a}|${b}` : `${b}|${a}`)
+
+/**
+ * https://soundcloud.com/artist/track -> the canonical URL.
+ *
+ * SoundCloud's widget takes the track URL directly, so there is nothing to
+ * resolve and no key to hold: w.soundcloud.com/player?url=<this>.
+ */
+export function parseSoundCloud(url) {
+  const m = String(url || '').trim()
+    .match(/^https?:\/\/(?:www\.|m\.)?soundcloud\.com\/([\w-]+\/(?:sets\/)?[\w-]+)(?:[?#]|$)/i)
+  return m ? `https://soundcloud.com/${m[1]}` : null
+}
+
+/** open.spotify.com/track/ID, or a spotify:track:ID URI. Ids are always 22 chars. */
+export function parseSpotify(url) {
+  const m = String(url || '').trim()
+    .match(/(?:open\.spotify\.com\/(?:intl-[a-z-]+\/)?|spotify:)(track|album|playlist|episode)[/:]([A-Za-z0-9]{22})/i)
+  return m ? { type: m[1].toLowerCase(), id: m[2] } : null
+}
+
+/**
  * https://pixeldrain.com/u/GKBvQx7Y -> GKBvQx7Y
  *
  * A bare id used to be accepted too, but any 8-letter word matches that shape —
@@ -47,6 +85,20 @@ export function parseYouTube(url) {
 export function resolveSource(url) {
   const yt = parseYouTube(url)
   if (yt) return { kind: 'youtube', source: yt, origin: `https://www.youtube.com/watch?v=${yt}` }
+
+  // Music. Both play in the host's own embed, so no bytes touch this server and
+  // neither needs a key, a token or a registered application.
+  const sc = parseSoundCloud(url)
+  if (sc) return { kind: 'soundcloud', source: sc, origin: sc }
+
+  const sp = parseSpotify(url)
+  if (sp) {
+    return {
+      kind: 'spotify',
+      source: `${sp.type}/${sp.id}`,
+      origin: `https://open.spotify.com/${sp.type}/${sp.id}`,
+    }
+  }
 
   const id = parsePixeldrain(url)
   if (id) return { kind: 'file', source: pixeldrainFile(id), origin: pixeldrainFile(id), id }

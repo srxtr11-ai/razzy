@@ -1,9 +1,9 @@
-import { useRef, useState } from 'react'
-import { Camera, Clapperboard, LogIn, Minus, Plus, Settings2 } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { Camera, Clapperboard, LogIn, Minus, Plus, Settings2, Users } from 'lucide-react'
 import { api, identity, pickAvatar, remember } from '../api.js'
 import { Avatar, Button, useLayout } from '../components/ui.jsx'
 
-export default function Lobby({ party }) {
+export default function Lobby({ party, onFriends, friendCount = 0 }) {
   const me = identity()
   const { tablet, landscape, short } = useLayout()
   const [name, setName] = useState(me.name)
@@ -17,6 +17,14 @@ export default function Lobby({ party }) {
 
   const ready = name.trim().length > 0
   const save = () => remember(name.trim(), avatar)
+
+  // Friends see this before you've joined anything, so it can't wait for the
+  // first party — otherwise everyone shows up in their list as "Guest".
+  useEffect(() => {
+    if (!name.trim()) return
+    const t = setTimeout(() => party.setProfile(name.trim(), avatar), 600)
+    return () => clearTimeout(t)
+  }, [name, avatar]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const choose = async (e) => {
     const f = e.target.files?.[0]
@@ -129,6 +137,21 @@ export default function Lobby({ party }) {
             >
               <Clapperboard size={18} />
               Create party
+            </Button>
+          </section>
+
+          {/* Friends live outside any party, so the way in is here too. */}
+          <section className={`glass rounded-3xl p-2 ${landscape && tablet ? 'col-span-2' : ''}`}>
+            <Button kind="ghost" className="w-full justify-between px-4" onClick={onFriends}>
+              <span className="flex items-center gap-2">
+                <Users size={17} />
+                Friends
+              </span>
+              {friendCount > 0 && (
+                <span className="min-w-5 h-5 px-1 rounded-full bg-grass text-black text-[11px] font-bold grid place-items-center">
+                  {friendCount}
+                </span>
+              )}
             </Button>
           </section>
         </div>

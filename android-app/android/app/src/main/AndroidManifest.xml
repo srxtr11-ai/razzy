@@ -30,6 +30,16 @@
 
         </activity>
 
+        <!--
+            Keeps the process alive while the app is in the background, so the
+            socket survives, playback keeps up with the room, and a friend's call
+            can still ring. It is only running while you are actually in a party.
+        -->
+        <service
+            android:name=".KeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
@@ -46,6 +56,11 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- Friend requests, messages, invites and calls arriving while you're elsewhere. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
 
     <!-- Runs on phones and tablets alike; nothing here needs a camera or GPS. -->
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />

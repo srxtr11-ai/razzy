@@ -38,11 +38,21 @@ export function useParty() {
   const [connected, setConnected] = useState(false)
   const [declined, setDeclined] = useState(false)
 
+  // People, as opposed to parties. These outlive any room.
+  const [me, setMe] = useState(() => ls.get('wp.me', null))
+  const [friends, setFriends] = useState([])
+  const [threads, setThreads] = useState({}) // friendId -> messages
+  const [ring, setRing] = useState(null) // someone is calling us
+  const [calling, setCalling] = useState(null) // we are calling someone
+  const [invites, setInvites] = useState([])
+
   const ws = useRef(null)
   const intent = useRef(null) // what to (re)send on open
   const inRoom = useRef(false) // have we ever actually got in? (ref: `open` never re-reads state)
   const onChat = useRef(() => {})
   const onSfx = useRef(() => {})
+  const onDm = useRef(() => {})
+  const onSocial = useRef(() => {}) // friend requests, invites, incoming calls
   const heard = useRef(0) // when the server last said anything at all
 
   const send = useCallback((msg) => {
@@ -55,6 +65,10 @@ export function useParty() {
 
     sock.onopen = () => {
       setConnected(true)
+      // Announce who we are before anything else. Friend requests, presence and
+      // calls all have to reach someone sitting in the lobby, so the server
+      // needs to know this socket exists independently of any party.
+      sock.send(JSON.stringify({ type: 'hello', ...identity() }))
       // On a fresh page load there's no intent yet — walk back into the party
       // this browser was in. The server still has our seat under the same id.
       if (!intent.current) {
@@ -97,6 +111,49 @@ export function useParty() {
         setRoom(null); setChat([]); setYouId(null)
         return
       }
+      /* --- people ---------------------------------------------------- */
+      if (m.type === 'me' || m.type === 'restored') {
+        // Kept locally too, so the friend code is on screen before the socket
+        // has said anything.
+        ls.set('wp.me', m.user)
+        setMe(m.user)
+        if (m.type === 'restored') {
+          ls.set('wp.id', m.user.id)
+          ls.set('wp.name', m.user.name)
+          if (m.user.avatar) ls.set('wp.avatar', m.user.avatar)
+          location.reload()
+        }
+        return
+      }
+      if (m.type === 'friends') return setFriends(m.friends)
+      if (m.type === 'dms') return setThreads((t) => ({ ...t, [m.with]: m.msgs }))
+      if (m.type === 'dm') {
+        setThreads((t) => ({ ...t, [m.with]: [...(t[m.with] || []), m.msg].slice(-200) }))
+        onDm.current(m)
+        return
+      }
+      if (m.type === 'friendreq' || m.type === 'friendok') return onSocial.current(m)
+      if (m.type === 'invite') {
+        setInvites((v) => [...v.filter((x) => x.from.id !== m.from.id), m])
+        onSocial.current(m)
+        return
+      }
+      if (m.type === 'ring') { setRing(m); onSocial.current(m); return }
+      if (m.type === 'calling') return setCalling(m)
+      if (m.type === 'callend') {
+        setRing((r) => (r?.callId === m.callId ? null : r))
+        setCalling((c) => (c?.callId === m.callId ? null : c))
+        return
+      }
+      // We answered — walk straight into their party, which is the whole point.
+      if (m.type === 'calljoin') {
+        setRing(null)
+        const { id, name, avatar } = identity()
+        intent.current = { type: 'join', code: m.code, id, name, avatar }
+        sock.send(JSON.stringify(intent.current))
+        return
+      }
+
       if (m.type === 'joinreq') return setJoinReqs((q) => [...q, m])
       if (m.type === 'countdown') return setCountdown(m.n)
       if (m.type === 'declined') {
@@ -171,7 +228,38 @@ export function useParty() {
     joinReqs, clearJoinReq: (id) => setJoinReqs((q) => q.filter((r) => r.id !== id)),
     onChatMessage: (fn) => { onChat.current = fn },
     onSound: (fn) => { onSfx.current = fn },
+    onDirectMessage: (fn) => { onDm.current = fn },
+    onSocial: (fn) => { onSocial.current = fn },
     send, create, join, leave,
+
+    /* people */
+    me, friends, threads, ring, calling, invites,
+    openThread: (id) => send({ type: 'dmHistory', id }),
+    sendDm: (id, text) => send({ type: 'dm', id, text }),
+    addFriend: (code) => send({ type: 'friendAdd', code }),
+    acceptFriend: (id) => send({ type: 'friendAccept', id }),
+    removeFriend: (id) => send({ type: 'friendRemove', id }),
+    invite: (id) => send({ type: 'invite', id }),
+    call: (id) => send({ type: 'call', id }),
+    answerCall: (callId) => send({ type: 'callAnswer', callId }),
+    declineCall: (callId) => send({ type: 'callDecline', callId }),
+    cancelCall: (callId) => send({ type: 'callCancel', callId }),
+    dismissInvite: (id) => setInvites((v) => v.filter((x) => x.from.id !== id)),
+    restore: (code, key) => send({ type: 'restore', code, key }),
+    /**
+     * Push a name or picture the moment it's typed, rather than waiting for the
+     * first party. Otherwise you add a friend and they see "Guest".
+     */
+    setProfile: (name, avatar) => {
+      remember(name, avatar)
+      send({ type: 'hello', ...identity() })
+    },
+    /** Walk into a friend's party without typing the code. */
+    joinCode: (code) => {
+      const { id, name, avatar } = identity()
+      intent.current = { type: 'join', code, id, name, avatar }
+      send(intent.current)
+    },
   }
 }
 

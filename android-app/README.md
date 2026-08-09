@@ -108,6 +108,31 @@ bar stayed sitting on top of the film. Immersive mode uses
 temporarily — a hidden navigation bar can never trap anyone. Android restores
 them whenever the window regains focus, so `onWindowFocusChanged` re-applies.
 
+## Notifications, and staying alive
+
+Android freezes a backgrounded app. For a watch party that means the socket
+dies, playback drifts out of sync, and a friend's call never rings — so while
+you are in a party, `KeepAliveService` holds the process in a bucket the system
+won't reclaim. It carries no logic at all; everything still happens in the
+WebView, and the service exists only to stop that WebView being put to sleep. It
+says so in the shade, because a background service you can't see is a battery
+complaint waiting to happen, and it stops the moment you leave the party.
+
+Capacitor also pauses the WebView when the activity goes away, which stops the
+timers driving playback and the socket's heartbeat, so `onPause` undoes that
+while a party is running.
+
+Notifications go through the same bridge rather than a plugin — friend requests,
+messages and invites on a normal channel, calls on one that pops over whatever
+you're doing, with a full-screen intent. They only fire when the app isn't the
+thing you're looking at; a notification for a message already on screen is noise.
+
+**What this cannot do:** if Android kills the app outright — swiped away, or
+reclaimed after a long time in the background — nothing arrives until you open
+it again. Waking a dead app needs a push service, which means Firebase, a
+`google-services.json` and a project registered with Google. That is a different
+piece of work, and it's the only way to get it.
+
 ## Shared code
 
 `src/components/players.jsx` and `src/sfx.js` are one-line re-exports of the
