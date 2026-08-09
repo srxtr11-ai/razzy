@@ -123,6 +123,14 @@ reclaims the same identity on a new phone.
 | Invite | A card that waits. |
 | Call | The same thing, ringing, with a 45-second life. Answering walks you straight into the caller's party — **there is no audio anywhere in this**; the point is that ringing someone is a much faster way to get them watching than typing a code at them. |
 | Skipping the door | Someone a *host* called or invited walks straight in. They already said yes by ringing. An ordinary member inviting a friend still puts them in the queue. |
+| Challenge | A round of Stack from the private chat: one attempt each, highest tower wins. The game posts its score out of the iframe; the page outside owns the ending, because the game has no idea anyone else is playing. |
+| The running score | Wins per pair, kept in the database and shown from your own point of view, so neither side has to work out which of them the row calls "a". |
+
+Avatar files belong to the person, not to a seat in a room. They used to be
+deleted the moment a membership ended, which — once identity outlived the room —
+meant your own picture was deleted when you walked out of a party, and everyone
+who had you as a friend saw an empty circle from then on. Nothing deletes them by
+hand now; a sweep collects files nobody points at.
 
 ## The game and the soundboard
 

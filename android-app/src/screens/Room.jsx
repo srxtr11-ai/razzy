@@ -11,7 +11,7 @@ import { Avatar, Button, CoHostBadge, OwnerBadge, Signal, fmt, useKeyboardInset,
 
 const CARD_MS = 4500
 
-export default function Room({ party, onFriends, friendCount = 0 }) {
+export default function Room({ party, onFriends, friendCount = 0, onPlayGame }) {
   const { room, you, youId, isOwner, isHost, chat, send } = party
   const layout = useLayout()
   const kb = useKeyboardInset()
@@ -29,7 +29,6 @@ export default function Room({ party, onFriends, friendCount = 0 }) {
   const [cards, setCards] = useState([])
   const [menu, setMenu] = useState(null)
   const [leaving, setLeaving] = useState(false)
-  const [gameOpen, setGameOpen] = useState(false)
   const [sfxToast, setSfxToast] = useState(null)
   const hideTimer = useRef(null)
   const cardTimers = useRef(new Map())
@@ -173,8 +172,6 @@ export default function Room({ party, onFriends, friendCount = 0 }) {
     })
   }, [party, youId])
 
-  // The film is the point; drop the game the moment there's something to watch.
-  useEffect(() => { if (!hostAway) setGameOpen(false) }, [hostAway])
 
   useEffect(() => {
     if (full) return
@@ -322,7 +319,7 @@ export default function Room({ party, onFriends, friendCount = 0 }) {
 
           {/* The host has dropped, and only the host can press play. Rather than
               stare at a frozen frame, there's something to do. */}
-          {hostAway && !gameOpen && !full && (
+          {hostAway && !full && (
             <div className="absolute inset-x-2 bottom-2 z-30">
               <div className="glass rounded-2xl p-2.5 flex items-center gap-2.5 pop">
                 <span className="grid place-items-center rounded-xl bg-grass/20 text-grass shrink-0"
@@ -334,7 +331,7 @@ export default function Room({ party, onFriends, friendCount = 0 }) {
                   <div className="text-[11px] text-white/45 leading-tight">Play a round while you wait?</div>
                 </div>
                 <Button kind="primary" className="px-4 shrink-0" style={{ minHeight: 40 }}
-                        onClick={() => setGameOpen(true)}>
+                        onClick={onPlayGame}>
                   Play
                 </Button>
               </div>
@@ -428,24 +425,6 @@ export default function Room({ party, onFriends, friendCount = 0 }) {
             keyboard={kb} hasSource={sources.length > 0}
           />
         </aside>
-      )}
-
-      {/* Its own window on purpose: the game binds mousedown, touchstart and the
-          spacebar to `window` and appends a canvas to `document.body`. Inlined
-          here it would swallow every tap in the app; closing the iframe unwinds
-          all of it, WebGL context included. */}
-      {gameOpen && (
-        <div className="fixed inset-0 z-[85] bg-ink">
-          <iframe src="/game/" title="Stack" className="w-full h-full border-0" />
-          <button
-            onClick={() => setGameOpen(false)}
-            className="press glass absolute right-3 rounded-2xl px-4 flex items-center gap-2 text-xs font-semibold"
-            style={{ top: 'calc(var(--top) + 0.75rem)', height: 'var(--tap)' }}
-          >
-            <X size={15} />
-            Back
-          </button>
-        </div>
       )}
 
       {menu && (

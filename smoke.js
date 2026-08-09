@@ -711,6 +711,34 @@ async function readyParty(tag, cap = 4) {
   assert.match(denied.error, /do not match/i, 'and a wrong key does not')
   console.log('· friends: invites, and an identity that moves between devices')
 
+  // A round of Stack from the private chat. One attempt each, highest wins.
+  stranger.send({ type: 'challenge', id: 'user-a' })
+  const notPals = await stranger.wait((m) => m.type === 'error', 4000)
+  assert.match(notPals.error, /friends/i, 'you can only challenge friends')
+
+  A.c.send({ type: 'challenge', id: 'user-b' })
+  const thrown = await B.c.wait((m) => m.type === 'challenge', 5000, true)
+  assert.equal(thrown.from.name, 'Amir')
+  B.c.send({ type: 'challengeAccept', matchId: thrown.matchId })
+  const goA = await A.c.wait((m) => m.type === 'gamestart', 5000)
+  const goB = await B.c.wait((m) => m.type === 'gamestart', 5000)
+  assert.equal(goA.opponent.name, 'Bea', 'each side is told who they are up against')
+  assert.equal(goB.opponent.name, 'Amir')
+
+  A.c.send({ type: 'gameScore', matchId: thrown.matchId, score: 9 })
+  const half = await B.c.wait((m) => m.type === 'gamescore', 5000, true)
+  assert.equal(half.scores['user-a'], 9, 'the other side sees it land')
+
+  // Second submissions are ignored — otherwise it's best-of-as-many-as-you-like.
+  A.c.send({ type: 'gameScore', matchId: thrown.matchId, score: 999 })
+  await new Promise((r) => setTimeout(r, 400))
+
+  B.c.send({ type: 'gameScore', matchId: thrown.matchId, score: 14 })
+  const result = await A.c.wait((m) => m.type === 'gameresult', 5000, true)
+  assert.equal(result.scores['user-a'], 9, 'a second attempt does not overwrite the first')
+  assert.equal(result.winner, 'user-b', 'the higher tower wins')
+  console.log('· friends: challenge at Stack, and the best score wins')
+
   A.c.ws.close(); B.c.ws.close(); stranger.ws.close(); fresh.ws.close()
 }
 
@@ -718,9 +746,15 @@ async function readyParty(tag, cap = 4) {
 // track or id in it — only a redirect. Refusing what someone just copied is a
 // bad first impression, so it gets followed.
 {
+  // Where a real shortener sends a made-up code is SoundCloud's business, so
+  // this asserts what's ours: the endpoint follows it, answers, and never
+  // invents a source out of a link that didn't name one.
   const short = await fetch(
     `${base}/api/v1/resolve?url=${encodeURIComponent('https://on.soundcloud.com/nonsense-that-does-not-exist')}`)
-  assert.equal(short.status, 400, 'a shortened link that leads nowhere is still refused')
+  assert.ok([200, 400].includes(short.status), 'a shortened link gets a straight answer')
+  if (short.status === 200) {
+    assert.equal((await short.json()).kind, 'soundcloud', 'and if it led somewhere, somewhere real')
+  }
 
   const full = await (await fetch(
     `${base}/api/v1/resolve?url=${encodeURIComponent('https://soundcloud.com/uiceheidd/lucid-dreams-forget-me')}`)).json()

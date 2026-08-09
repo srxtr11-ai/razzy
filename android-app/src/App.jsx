@@ -4,11 +4,13 @@ import { useParty } from './api.js'
 import Lobby from './screens/Lobby.jsx'
 import Room from './screens/Room.jsx'
 import Friends, { CallOverlay, InviteCards } from './Friends.jsx'
+import GameOverlay, { ChallengeCard, WaitingForChallenge } from './Game.jsx'
 import { Button } from './components/ui.jsx'
 
 export default function App() {
   const party = useParty()
   const [friendsOpen, setFriendsOpen] = useState(false)
+  const [soloGame, setSoloGame] = useState(false)
 
   useEffect(() => {
     if (!party.error) return
@@ -41,10 +43,19 @@ export default function App() {
   const pending = party.friends.filter((f) => f.incoming).length
 
   /** A call has to reach you wherever you are, so this sits above every screen. */
+  // A challenge can arrive in the lobby or mid-film, so the board sits above
+  // everything rather than inside the room.
+  const playing = party.match?.playing || soloGame
+
   const social = (
     <>
       <InviteCards party={party} />
+      <ChallengeCard party={party} />
+      <WaitingForChallenge party={party} />
       <CallOverlay party={party} />
+      {playing && (
+        <GameOverlay party={party} solo={!party.match?.playing} onClose={() => setSoloGame(false)} />
+      )}
       <div
         className={`fixed inset-0 z-[88] transition-transform duration-300 ${
           friendsOpen ? 'translate-x-0' : 'translate-x-full pointer-events-none'
@@ -97,7 +108,12 @@ export default function App() {
 
   return (
     <>
-      <Room party={party} onFriends={() => setFriendsOpen(true)} friendCount={pending} />
+      <Room
+        party={party}
+        onFriends={() => setFriendsOpen(true)}
+        friendCount={pending}
+        onPlayGame={() => setSoloGame(true)}
+      />
       {social}
       {party.error && (
         <div

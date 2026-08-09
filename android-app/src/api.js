@@ -80,8 +80,13 @@ const noteId = (s) => {
   return Math.abs(h) % 100000
 }
 
-export const notify = (tag, title, body, urgent = false) => {
-  try { native()?.notify?.(noteId(tag), String(title), String(body), !!urgent) } catch {}
+/**
+ * `callId` turns this into a ringing notification with Answer and Decline on it.
+ * Without those a call was only a nudge to go and open the app and find the
+ * button — which is not what a ringing phone is supposed to mean.
+ */
+export const notify = (tag, title, body, urgent = false, callId = null) => {
+  try { native()?.notify?.(noteId(tag), String(title), String(body), !!urgent, callId) } catch {}
 }
 export const clearNote = (tag) => {
   try { native()?.cancelNote?.(noteId(tag)) } catch {}
@@ -136,6 +141,8 @@ export function useParty() {
   const [ring, setRing] = useState(null)
   const [calling, setCalling] = useState(null)
   const [invites, setInvites] = useState([])
+  const [challenge, setChallenge] = useState(null)
+  const [match, setMatch] = useState(null)
 
   const ws = useRef(null)
   const intent = useRef(null)
@@ -236,10 +243,35 @@ export function useParty() {
         away(`inv-${m.from.id}`, m.from.name, `invited you to party ${m.code}`)
         return
       }
+      /* a game between two friends */
+      if (m.type === 'challenge') {
+        setChallenge(m)
+        away(`game-${m.from.id}`, m.from.name, 'challenges you at Stack')
+        return
+      }
+      if (m.type === 'challenged') {
+        return setMatch({ matchId: m.matchId, opponentId: m.to, waitingForThem: true })
+      }
+      if (m.type === 'gamestart') {
+        setChallenge(null)
+        return setMatch({ matchId: m.matchId, opponent: m.opponent, scores: {}, playing: true })
+      }
+      if (m.type === 'gamescore') {
+        return setMatch((g) => (g?.matchId === m.matchId ? { ...g, scores: m.scores } : g))
+      }
+      if (m.type === 'gameresult') {
+        return setMatch((g) =>
+          g?.matchId === m.matchId ? { ...g, scores: m.scores, winner: m.winner, done: true } : g)
+      }
+      if (m.type === 'gameend') {
+        setChallenge((c) => (c?.matchId === m.matchId ? null : c))
+        return setMatch((g) => (g?.matchId === m.matchId ? null : g))
+      }
+
       if (m.type === 'ring') {
         setRing(m)
-        // Urgent: this one is allowed to interrupt whatever you're doing.
-        notify(`call-${m.callId}`, m.from.name, 'is calling you into a party', true)
+        // Urgent, and answerable without opening the app first.
+        notify(`call-${m.callId}`, m.from.name, 'is calling you into a party', true, m.callId)
         return
       }
       if (m.type === 'calling') return setCalling(m)
@@ -313,6 +345,21 @@ export function useParty() {
     return () => clearInterval(id)
   }, [])
 
+  /**
+   * Answer and Decline on the call notification come back through here. The
+   * activity can't act on them itself — answering means using the socket, and
+   * the socket is in this page.
+   */
+  useEffect(() => {
+    window.__razzyCall = (action, callId) => {
+      if (!callId) return
+      send({ type: action === 'answer' ? 'callAnswer' : 'callDecline', callId })
+      clearNote(`call-${callId}`)
+      if (action !== 'answer') setRing((r) => (r?.callId === callId ? null : r))
+    }
+    return () => { delete window.__razzyCall }
+  }, [send])
+
   useEffect(() => {
     if (countdown === null) return
     const t = setTimeout(() => setCountdown(null), countdown === 0 ? 700 : 1000)
@@ -346,7 +393,12 @@ export function useParty() {
     send, create, join,
 
     /* people */
-    me, friends, threads, ring, calling, invites,
+    me, friends, threads, ring, calling, invites, challenge, match,
+    challengeFriend: (id) => send({ type: 'challenge', id }),
+    acceptChallenge: (matchId) => send({ type: 'challengeAccept', matchId }),
+    declineChallenge: (matchId) => send({ type: 'challengeDecline', matchId }),
+    quitMatch: (matchId) => { send({ type: 'challengeCancel', matchId }); setMatch(null); setChallenge(null) },
+    reportScore: (matchId, score) => send({ type: 'gameScore', matchId, score }),
     openThread: (id) => send({ type: 'dmHistory', id }),
     sendDm: (id, text) => send({ type: 'dm', id, text }),
     addFriend: (code) => send({ type: 'friendAdd', code }),
@@ -371,17 +423,8 @@ export function useParty() {
   }
 }
 
-/** Downscale to 128px before upload — phone cameras produce 4 MB selfies. */
-export async function pickAvatar(file) {
-  const bitmap = await createImageBitmap(file)
-  const size = 128
-  const c = document.createElement('canvas')
-  c.width = c.height = size
-  const ctx = c.getContext('2d')
-  const scale = Math.max(size / bitmap.width, size / bitmap.height)
-  const w = bitmap.width * scale
-  const h = bitmap.height * scale
-  ctx.drawImage(bitmap, (size - w) / 2, (size - h) / 2, w, h)
-  const { url } = await api.uploadAvatar(c.toDataURL('image/jpeg', 0.8))
+/** Send an already-cropped square data URL and get back an absolute URL. */
+export async function pickAvatar(dataUrl) {
+  const { url } = await api.uploadAvatar(dataUrl)
   return api.media(url)
 }

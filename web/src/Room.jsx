@@ -11,7 +11,7 @@ import { SOUNDS, playSound } from './sfx.js'
 const CARD_MS = 4500
 const SPRING = 'ease-[cubic-bezier(.34,1.2,.64,1)]'
 
-export default function Room({ party, onFriends, friendCount = 0 }) {
+export default function Room({ party, onFriends, friendCount = 0, onPlayGame }) {
   const { room, you, youId, isOwner, chat, send } = party
   const video = useRef(null)
   const [focus, setFocus] = useState(false)
@@ -24,7 +24,6 @@ export default function Room({ party, onFriends, friendCount = 0 }) {
   const [urlDraft, setUrlDraft] = useState('')
   const [leaving, setLeaving] = useState(false)
   const [quality, setQuality] = useState(0) // index into room.sources — a personal choice
-  const [gameOpen, setGameOpen] = useState(false) // the stack game, while the host is away
   const [sfxToast, setSfxToast] = useState(null)
   const hideTimer = useRef(null)
   const cardTimers = useRef(new Map())
@@ -152,9 +151,6 @@ export default function Room({ party, onFriends, friendCount = 0 }) {
       setTimeout(() => setSfxToast((t) => (t && Date.now() - t.at >= 1800 ? null : t)), 2000)
     })
   }, [party, youId])
-
-  // The film is the point; close the game the moment there's something to watch.
-  useEffect(() => { if (!hostAway) setGameOpen(false) }, [hostAway])
 
   /* ------------------------------------------------- notification cards */
 
@@ -304,7 +300,7 @@ export default function Room({ party, onFriends, friendCount = 0 }) {
           )}
 
           {party.countdown !== null && (
-            <div className="absolute inset-0 z-40 grid place-items-center bg-black/50 backdrop-blur-md">
+            <div className="absolute inset-0 z-40 grid place-items-center bg-black/75">
               <div key={party.countdown} className="text-8xl font-bold text-grass card-in drop-shadow-[0_8px_30px_rgba(34,197,94,.5)]">
                 {party.countdown === 0 ? 'GO' : party.countdown}
               </div>
@@ -316,7 +312,7 @@ export default function Room({ party, onFriends, friendCount = 0 }) {
           {/* The host has dropped and only the host can press play, so the room
               is going nowhere until they're back. Rather than stare at a frozen
               frame, there's something to do. */}
-          {hostAway && !gameOpen && !focus && (
+          {hostAway && !focus && (
             <div className="absolute inset-x-4 bottom-4 z-30 flex justify-center">
               <div className="liquid rounded-3xl px-4 py-3 flex items-center gap-3 card-in max-w-sm">
                 <span className="grid place-items-center w-10 h-10 rounded-2xl bg-grass/20 text-grass shrink-0">
@@ -326,7 +322,7 @@ export default function Room({ party, onFriends, friendCount = 0 }) {
                   <div className="text-sm font-semibold leading-tight">{host.name} dropped out</div>
                   <div className="text-xs text-white/45 leading-tight">Play a round while you wait?</div>
                 </div>
-                <Button kind="primary" className="shrink-0 px-4 h-10" onClick={() => setGameOpen(true)}>
+                <Button kind="primary" className="shrink-0 px-4 h-10" onClick={onPlayGame}>
                   Play
                 </Button>
               </div>
@@ -391,24 +387,6 @@ export default function Room({ party, onFriends, friendCount = 0 }) {
         </div>
       </main>
 
-      {/* The game gets its own window on purpose. It binds mousedown, touchstart
-          and the spacebar to `window` and appends a canvas to `document.body` —
-          dropped straight into this page it would swallow every tap in the app.
-          Closing the iframe also unwinds all of it, including the WebGL context. */}
-      {gameOpen && (
-        <div className="fixed inset-0 z-[75] bg-ink">
-          <iframe src="/game/" title="Stack" className="w-full h-full border-0" />
-          <button
-            onClick={() => setGameOpen(false)}
-            className="liquid press absolute top-4 right-4 z-10 rounded-2xl pl-3 pr-4 h-11 flex items-center gap-2 text-xs font-semibold"
-            style={{ top: 'max(1rem, env(safe-area-inset-top))' }}
-          >
-            <X size={15} />
-            Back to the party
-          </button>
-        </div>
-      )}
-
       {leaving && (
         <LeaveSheet
           room={room} youId={youId} isOwner={isOwner}
@@ -449,7 +427,7 @@ function LeaveSheet({ room, youId, isOwner, onCancel, onLeave, onHandOver }) {
   const mustHandOver = isOwner && others.length > 0
 
   return (
-    <div className="fixed inset-0 z-[70] grid place-items-center bg-black/60 backdrop-blur-md px-6" onClick={onCancel}>
+    <div className="fixed inset-0 z-[70] grid place-items-center bg-black/80 px-6" onClick={onCancel}>
       <div className="liquid rounded-[2rem] p-6 w-full max-w-sm space-y-4 card-in" onClick={(e) => e.stopPropagation()}>
         <div className="text-center space-y-1">
           <h2 className="text-lg font-semibold">{mustHandOver ? 'Pick the next host' : 'Leave the party?'}</h2>
@@ -497,7 +475,7 @@ function LeaveSheet({ room, youId, isOwner, onCancel, onLeave, onHandOver }) {
 function ReadyCheck({ room, you, send }) {
   const notReady = room.members.filter((m) => m.approved && m.online && !m.ready)
   return (
-    <div className="absolute inset-0 z-40 grid place-items-center bg-black/60 backdrop-blur-md px-6">
+    <div className="absolute inset-0 z-40 grid place-items-center bg-black/80 px-6">
       <div className="liquid glare rounded-[2rem] p-6 w-full max-w-sm text-center space-y-4 card-in" onPointerMove={glare.onPointerMove}>
         <h2 className="text-lg font-semibold">Ready check</h2>
         <div className="flex flex-wrap justify-center gap-2">

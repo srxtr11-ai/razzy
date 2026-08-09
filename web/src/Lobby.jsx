@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Camera, Clapperboard, LogIn, Minus, Plus, Users } from 'lucide-react'
 import { identity, remember, uploadAvatar } from './party.js'
 import { Avatar, Button, glare } from './ui.jsx'
+import Cropper from './Cropper.jsx'
 
 /** Ambient colour for the glass to refract — without it, glass reads as grey. */
 export function Ambient() {
@@ -21,6 +22,7 @@ export default function Lobby({ party, onFriends, friendCount = 0 }) {
   const [code, setCode] = useState('')
   const [cap, setCap] = useState(6)
   const [busy, setBusy] = useState(false)
+  const [cropping, setCropping] = useState(null)
   const file = useRef(null)
 
   const ready = name.trim().length > 0
@@ -34,11 +36,24 @@ export default function Lobby({ party, onFriends, friendCount = 0 }) {
     return () => clearTimeout(t)
   }, [name, avatar]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const pick = async (e) => {
+  // Choosing the file only opens the cropper; nothing is uploaded until it's
+  // framed. A phone camera hands you a photo of a whole room.
+  const pick = (e) => {
     const f = e.target.files?.[0]
-    if (!f) return
+    e.target.value = '' // so picking the same file twice still fires
+    if (f) setCropping(f)
+  }
+
+  const saveAvatar = async (dataUrl) => {
     setBusy(true)
-    try { setAvatar(await uploadAvatar(f)) } catch { party.setError('Could not upload that image') }
+    try {
+      const url = await uploadAvatar(dataUrl)
+      setAvatar(url)
+      party.setProfile(name.trim() || 'Guest', url)
+      setCropping(null)
+    } catch {
+      party.setError('Could not upload that image')
+    }
     setBusy(false)
   }
 
@@ -151,6 +166,10 @@ export default function Lobby({ party, onFriends, friendCount = 0 }) {
           {!party.connected && <p className="mt-4 text-center text-xs text-white/30">Connecting…</p>}
         </div>
       </div>
+
+      {cropping && (
+        <Cropper file={cropping} onCancel={() => setCropping(null)} onDone={saveAvatar} />
+      )}
     </>
   )
 }

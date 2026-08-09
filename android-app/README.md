@@ -133,6 +133,33 @@ it again. Waking a dead app needs a push service, which means Firebase, a
 `google-services.json` and a project registered with Google. That is a different
 piece of work, and it's the only way to get it.
 
+## Signing
+
+The debug key is why Android warns on every single install: it is a well-known
+shared key and the app is marked debuggable, so Play Protect treats it as
+something to complain about each time. `npm run apk:release` signs with a key of
+our own instead, which stops the repeat warnings and — because the signature is
+now stable — lets a new build install over the old one.
+
+The key and its password live in `android/razzy.keystore` and
+`android/keystore.properties`, both untracked. **Losing them means a new
+signature**, and a new signature means uninstalling before the next build will
+install. Back them up somewhere that isn't this machine.
+
+Sideloading still shows a one-off "unknown app" prompt the first time. Nothing
+short of publishing to the Play Store removes that one.
+
+## Ads
+
+`AdBlock.java` drops requests to ad and measurement hosts before they leave the
+device. It isn't only about not watching adverts: a pre-roll desynchronises the
+room for everyone, because one viewer sits through thirty seconds of something
+else while the film carries on and the room stops to wait for them.
+
+It's a blocklist, so it's partial by construction. Where YouTube serves an advert
+from the same host and path as the video, nothing at this layer can tell them
+apart.
+
 ## Shared code
 
 `src/components/players.jsx`, `src/sfx.js` and `src/Friends.jsx` are one-line
@@ -140,13 +167,19 @@ re-exports of the website's. They used to be copies, which is precisely why a
 buffering fix could land on the site and leave the app still broken — `lib.js` is
 already shared across the repo root the same way.
 
-**This needs `resolve.dedupe` in `vite.config.js`, and the app is dead without
-it.** Those files live outside this project, so their `import ... from 'react'`
-resolves against `web/node_modules` while everything here uses its own copy. Two
-Reacts in one bundle means the second one's hook dispatcher is null and the app
-dies on the first `useState` — with a blank screen, no error on the device, and
-nothing in the launcher to suggest why. It builds and installs perfectly. If a
-future shared import ever brings its own dependency, add it to that list.
+Sharing files across the project boundary takes **two** settings, and each fails
+in a way the build never mentions:
+
+- **`resolve.dedupe` in `vite.config.js`** — those files resolve `react` against
+  `web/node_modules` while everything here uses its own copy. Two Reacts in one
+  bundle means the second one's hook dispatcher is null and the app dies on the
+  first `useState`: blank screen, no error on the device, nothing in the launcher
+  to suggest why. Add any future shared dependency to that list.
+- **`@source "../../web/src"` in `theme.css`** — Tailwind only scans its own
+  project, so a class used in a shared file and nowhere in this app was never
+  generated. Half-styled rather than dead, which is worse: a close button written
+  `w-11 h-11` came out 44px tall and 18px wide, because `h-11` happened to be
+  used here and `w-11` did not.
 
 The way to catch this without a phone is to serve the built bundle and open it:
 

@@ -45,6 +45,8 @@ export function useParty() {
   const [ring, setRing] = useState(null) // someone is calling us
   const [calling, setCalling] = useState(null) // we are calling someone
   const [invites, setInvites] = useState([])
+  const [challenge, setChallenge] = useState(null) // someone wants a game
+  const [match, setMatch] = useState(null) // the game itself
 
   const ws = useRef(null)
   const intent = useRef(null) // what to (re)send on open
@@ -138,6 +140,27 @@ export function useParty() {
         onSocial.current(m)
         return
       }
+      /* a game between two friends */
+      if (m.type === 'challenge') { setChallenge(m); onSocial.current(m); return }
+      if (m.type === 'challenged') {
+        return setMatch({ matchId: m.matchId, opponentId: m.to, waitingForThem: true })
+      }
+      if (m.type === 'gamestart') {
+        setChallenge(null)
+        return setMatch({ matchId: m.matchId, opponent: m.opponent, scores: {}, playing: true })
+      }
+      if (m.type === 'gamescore') {
+        return setMatch((g) => (g?.matchId === m.matchId ? { ...g, scores: m.scores } : g))
+      }
+      if (m.type === 'gameresult') {
+        return setMatch((g) =>
+          g?.matchId === m.matchId ? { ...g, scores: m.scores, winner: m.winner, done: true } : g)
+      }
+      if (m.type === 'gameend') {
+        setChallenge((c) => (c?.matchId === m.matchId ? null : c))
+        return setMatch((g) => (g?.matchId === m.matchId ? null : g))
+      }
+
       if (m.type === 'ring') { setRing(m); onSocial.current(m); return }
       if (m.type === 'calling') return setCalling(m)
       if (m.type === 'callend') {
@@ -233,7 +256,12 @@ export function useParty() {
     send, create, join, leave,
 
     /* people */
-    me, friends, threads, ring, calling, invites,
+    me, friends, threads, ring, calling, invites, challenge, match,
+    challengeFriend: (id) => send({ type: 'challenge', id }),
+    acceptChallenge: (matchId) => send({ type: 'challengeAccept', matchId }),
+    declineChallenge: (matchId) => send({ type: 'challengeDecline', matchId }),
+    quitMatch: (matchId) => { send({ type: 'challengeCancel', matchId }); setMatch(null); setChallenge(null) },
+    reportScore: (matchId, score) => send({ type: 'gameScore', matchId, score }),
     openThread: (id) => send({ type: 'dmHistory', id }),
     sendDm: (id, text) => send({ type: 'dm', id, text }),
     addFriend: (code) => send({ type: 'friendAdd', code }),
@@ -263,18 +291,8 @@ export function useParty() {
   }
 }
 
-/** Downscale to 128px and upload as a data URL. ~10 KB, no multipart, no bucket. */
-export async function uploadAvatar(file) {
-  const bitmap = await createImageBitmap(file)
-  const size = 128
-  const c = document.createElement('canvas')
-  c.width = c.height = size
-  const ctx = c.getContext('2d')
-  const scale = Math.max(size / bitmap.width, size / bitmap.height)
-  const w = bitmap.width * scale
-  const h = bitmap.height * scale
-  ctx.drawImage(bitmap, (size - w) / 2, (size - h) / 2, w, h)
-  const dataUrl = c.toDataURL('image/jpeg', 0.8)
+/** Send an already-cropped square data URL. No multipart, no bucket. */
+export async function uploadAvatar(dataUrl) {
   const res = await fetch('/api/avatar', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },

@@ -21,6 +21,8 @@ import androidx.core.view.WindowInsetsControllerCompat;
 
 import com.getcapacitor.BridgeActivity;
 
+import org.json.JSONObject;
+
 public class MainActivity extends BridgeActivity {
 
     private static final String CH_CALLS = "razzy.calls";
@@ -78,6 +80,14 @@ public class MainActivity extends BridgeActivity {
         // "Full screen" button could only collapse Razzy's own chrome and the
         // notification bar stayed on top of the film.
         webView.addJavascriptInterface(new Shell(), "RazzyNative");
+
+        // Drop ad and tracking requests before they leave the device. Subclassing
+        // Capacitor's own client rather than replacing it, so the local-server
+        // handling it does keeps working.
+        webView.setWebViewClient(new AdBlock(getBridge()));
+
+        // Launched by tapping Answer or Decline on a call notification.
+        handleAction(getIntent());
     }
 
     /** Everything the page is allowed to ask the platform for. */
@@ -105,15 +115,15 @@ public class MainActivity extends BridgeActivity {
          * A friend request, a message, an invite or a call arriving while you're
          * in another app. `urgent` puts it on a channel that pops over whatever
          * you're doing, which is what a ringing call needs and a chat line does not.
+         *
+         * `answer` is a call id. When it's there the notification grows Answer and
+         * Decline buttons — without them a ring was only a nudge to go and open
+         * the app and find the button, which is not what a ringing phone means.
          */
         @JavascriptInterface
-        public void notify(final int id, final String title, final String body, final boolean urgent) {
-            PendingIntent open = PendingIntent.getActivity(
-                MainActivity.this, id,
-                new Intent(MainActivity.this, MainActivity.class)
-                    .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT),
-                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT
-            );
+        public void notify(final int id, final String title, final String body,
+                           final boolean urgent, final String answer) {
+            PendingIntent open = intent(id, null, null);
             NotificationCompat.Builder b =
                 new NotificationCompat.Builder(MainActivity.this, urgent ? CH_CALLS : CH_MESSAGES)
                     .setContentTitle(title)
@@ -122,7 +132,17 @@ public class MainActivity extends BridgeActivity {
                     .setContentIntent(open)
                     .setAutoCancel(true)
                     .setPriority(urgent ? NotificationCompat.PRIORITY_MAX : NotificationCompat.PRIORITY_DEFAULT);
-            if (urgent) b.setCategory(NotificationCompat.CATEGORY_CALL).setFullScreenIntent(open, true);
+
+            if (urgent) {
+                b.setCategory(NotificationCompat.CATEGORY_CALL)
+                 .setOngoing(answer != null)
+                 // Shows the whole thing over the lock screen on most phones.
+                 .setFullScreenIntent(open, true);
+            }
+            if (answer != null) {
+                b.addAction(0, "Decline", intent(id + 1, "decline", answer));
+                b.addAction(0, "Answer", intent(id + 2, "answer", answer));
+            }
             try {
                 NotificationManagerCompat.from(MainActivity.this).notify(id, b.build());
             } catch (SecurityException ignored) {
@@ -134,6 +154,40 @@ public class MainActivity extends BridgeActivity {
         public void cancelNote(final int id) {
             NotificationManagerCompat.from(MainActivity.this).cancel(id);
         }
+    }
+
+    /**
+     * Notification taps all come back through the activity rather than a
+     * receiver, because answering a call means using the websocket — and the
+     * websocket lives in the WebView. Bringing the app forward with the decision
+     * attached is the shortest path to the one place that can act on it.
+     */
+    private PendingIntent intent(int id, String action, String callId) {
+        Intent i = new Intent(this, MainActivity.class)
+            .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+        if (action != null) i.putExtra("razzyAction", action).putExtra("razzyCall", callId);
+        return PendingIntent.getActivity(
+            this, id, i, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleAction(intent);
+    }
+
+    /** Hand the choice to the page, which owns the socket. */
+    private void handleAction(Intent intent) {
+        if (intent == null) return;
+        String action = intent.getStringExtra("razzyAction");
+        String call = intent.getStringExtra("razzyCall");
+        if (action == null || call == null || web == null) return;
+        intent.removeExtra("razzyAction");
+        final String js = "window.__razzyCall && window.__razzyCall("
+            + JSONObject.quote(action) + "," + JSONObject.quote(call) + ")";
+        // A cold start has no page yet; a moment's delay is enough for one.
+        web.postDelayed(() -> web.evaluateJavascript(js, null), 600);
     }
 
     private void channels() {

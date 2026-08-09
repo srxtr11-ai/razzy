@@ -4,11 +4,13 @@ import { useParty } from './party.js'
 import Lobby, { Ambient } from './Lobby.jsx'
 import Room from './Room.jsx'
 import Friends, { CallOverlay, InviteCards } from './Friends.jsx'
+import GameOverlay, { ChallengeCard, WaitingForChallenge } from './Game.jsx'
 import { Button } from './ui.jsx'
 
 export default function App() {
   const party = useParty()
   const [friendsOpen, setFriendsOpen] = useState(false)
+  const [soloGame, setSoloGame] = useState(false)
 
   useEffect(() => {
     if (!party.error) return
@@ -22,10 +24,19 @@ export default function App() {
 
   /** Rings, invite cards and the friends drawer sit above everything, in the
       lobby and in a room alike — a call has to reach you wherever you are. */
+  // A challenge can arrive in the lobby or mid-film, so the board sits above
+  // everything rather than inside the room.
+  const playing = party.match?.playing || soloGame
+
   const social = (
     <>
       <InviteCards party={party} />
+      <ChallengeCard party={party} />
+      <WaitingForChallenge party={party} />
       <CallOverlay party={party} />
+      {playing && (
+        <GameOverlay party={party} solo={!party.match?.playing} onClose={() => setSoloGame(false)} />
+      )}
       <div
         className={`fixed inset-y-0 right-0 z-[85] w-[min(92vw,24rem)] transition-transform duration-400 ease-[cubic-bezier(.34,1.2,.64,1)]
           ${friendsOpen ? 'translate-x-0' : 'translate-x-full pointer-events-none'}`}
@@ -85,7 +96,12 @@ export default function App() {
 
   return (
     <>
-      <Room party={party} onFriends={() => setFriendsOpen(true)} friendCount={pending} />
+      <Room
+        party={party}
+        onFriends={() => setFriendsOpen(true)}
+        friendCount={pending}
+        onPlayGame={() => setSoloGame(true)}
+      />
       {social}
       {party.error && (
         <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[60] liquid rounded-full px-5 h-11 grid place-items-center text-sm text-red-300 card-in">

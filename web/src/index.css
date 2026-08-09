@@ -47,8 +47,24 @@ body {
 
 /* The housing: deep blur, multi-layer shadow for real volume, light edge on
    top, refracted caustic below, hairline outer shell. */
-.liquid {
+/**
+ * `position` is deliberately absent.
+ *
+ * It used to say `position: relative` here, for the ::before reflection to hang
+ * off — and because this file is unlayered CSS it beat Tailwind's `absolute` and
+ * `fixed`, which live in the utilities layer. So every glass element that was
+ * *also* meant to be positioned quietly wasn't, and landed wherever the document
+ * flow put it. Nine of them across the app, each looking almost right because a
+ * `-translate-x-1/2` still applied.
+ *
+ * The rule below gives the same default without winning the argument: it only
+ * applies to elements the author hasn't positioned themselves.
+ */
+.liquid:not(.absolute, .fixed, .sticky) {
   position: relative;
+}
+
+.liquid {
   background: var(--glass-bg);
   backdrop-filter: blur(40px) saturate(190%);
   -webkit-backdrop-filter: blur(40px) saturate(190%);

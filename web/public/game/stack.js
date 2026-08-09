@@ -195,11 +195,36 @@ function missedTheSpot() {
   scene.remove(topLayer.threejs)
 
   gameEnded = true
-  if (!autopilot) {
-    finalEl.innerText = Math.max(0, stack.length - 2)
-    resultsEl.classList.add('show')
-  }
+  if (autopilot) return
+
+  const score = Math.max(0, stack.length - 2)
+  finalEl.innerText = score
+  post({ razzy: 'score', score })
+  // In a challenge the page outside owns the ending — it can't say who won until
+  // the other player has finished too.
+  if (!matchMode) resultsEl.classList.add('show')
 }
+
+/* ----------------------------------------------------------- host page */
+
+/**
+ * Razzy runs this in an iframe, so the score is handed out rather than read.
+ * Same origin either way, but postMessage keeps the game standalone.
+ */
+let matchMode = false
+
+function post(msg) {
+  try { if (window.parent !== window) window.parent.postMessage(msg, '*') } catch {}
+}
+
+window.addEventListener('message', (e) => {
+  const d = e.data
+  if (!d || typeof d !== 'object' || d.razzy !== 'command') return
+  if (d.cmd === 'match') matchMode = !!d.on
+  if (d.cmd === 'restart') startGame()
+})
+
+post({ razzy: 'ready' })
 
 function animation(time) {
   if (lastTime) {

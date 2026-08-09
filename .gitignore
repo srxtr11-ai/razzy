@@ -3,3 +3,9 @@ data/
 .smoke-data/
 web/dist/
 *.log
+
+# The Android signing key and its password. Losing this means a new signature,
+# which means uninstalling before the next update will install.
+android-app/android/razzy.keystore
+android-app/android/keystore.properties
+android-app/dist/

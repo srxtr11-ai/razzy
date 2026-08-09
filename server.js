@@ -143,15 +143,46 @@ function say(r, text, kind = 'system') {
 }
 
 function destroy(r) {
-  for (const m of r.members.values()) rmAvatar(m.avatar)
   rooms.delete(r.code)
   dropStmt.run(r.code)
 }
 
-function rmAvatar(url) {
-  if (!url?.startsWith('/avatars/')) return
-  fs.rm(path.join(AVATARS, path.basename(url)), { force: true }, () => {})
+/**
+ * Avatar files belong to the person, not to a seat in a room.
+ *
+ * They used to be deleted the moment a membership ended — leaving a party,
+ * being removed, the room closing, the reaper. Once identity outlived the room
+ * that meant your own picture was deleted when you walked out of a party, and
+ * you and everyone who had you as a friend saw an empty circle from then on.
+ *
+ * So nothing deletes them by hand any more. Instead this sweeps for files no
+ * user and no live member points at. The hour of grace covers a picture that has
+ * been uploaded but not yet attached to anything.
+ */
+function sweepAvatars() {
+  const keep = new Set()
+  for (const row of db.prepare(`SELECT avatar FROM users WHERE avatar IS NOT NULL`).all()) {
+    if (row.avatar?.startsWith('/avatars/')) keep.add(path.basename(row.avatar))
+  }
+  for (const r of rooms.values()) {
+    for (const m of r.members.values()) {
+      if (m.avatar?.startsWith('/avatars/')) keep.add(path.basename(m.avatar))
+    }
+  }
+  fs.readdir(AVATARS, (err, files) => {
+    if (err) return
+    const cutoff = Date.now() - 3600_000
+    for (const f of files) {
+      if (keep.has(f)) continue
+      const full = path.join(AVATARS, f)
+      fs.stat(full, (e, st) => {
+        if (!e && st.mtimeMs < cutoff) fs.rm(full, { force: true }, () => {})
+      })
+    }
+  })
 }
+setInterval(sweepAvatars, 6 * 3600_000)
+setTimeout(sweepAvatars, 60_000)
 
 /* --------------------------------------------------------------- people */
 
@@ -172,7 +203,10 @@ db.exec(`
   );
   CREATE TABLE IF NOT EXISTS friends (
     pair TEXT PRIMARY KEY, a TEXT NOT NULL, b TEXT NOT NULL,
-    asked TEXT NOT NULL, accepted INTEGER NOT NULL DEFAULT 0, at INTEGER NOT NULL
+    asked TEXT NOT NULL, accepted INTEGER NOT NULL DEFAULT 0, at INTEGER NOT NULL,
+    -- the running score at Stack, counted in the pair's own a/b order
+    winsA INTEGER NOT NULL DEFAULT 0, winsB INTEGER NOT NULL DEFAULT 0,
+    draws INTEGER NOT NULL DEFAULT 0
   );
   CREATE TABLE IF NOT EXISTS dms (
     id TEXT PRIMARY KEY, pair TEXT NOT NULL, fromId TEXT NOT NULL,
@@ -180,6 +214,13 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS dms_pair ON dms (pair, at);
 `)
+
+// CREATE TABLE IF NOT EXISTS leaves an existing table alone, so a database made
+// before the scoreboard existed needs the columns adding by hand. Each throws if
+// it is already there, which is the only way SQLite offers to ask.
+for (const col of ['winsA INTEGER NOT NULL DEFAULT 0', 'winsB INTEGER NOT NULL DEFAULT 0', 'draws INTEGER NOT NULL DEFAULT 0']) {
+  try { db.exec(`ALTER TABLE friends ADD COLUMN ${col}`) } catch {}
+}
 
 const q = {
   user: db.prepare(`SELECT * FROM users WHERE id = ?`),
@@ -192,6 +233,9 @@ const q = {
   link: db.prepare(`SELECT * FROM friends WHERE pair = ?`),
   addLink: db.prepare(`INSERT INTO friends (pair,a,b,asked,accepted,at) VALUES (?,?,?,?,0,?)`),
   acceptLink: db.prepare(`UPDATE friends SET accepted = 1 WHERE pair = ?`),
+  winA: db.prepare(`UPDATE friends SET winsA = winsA + 1 WHERE pair = ?`),
+  winB: db.prepare(`UPDATE friends SET winsB = winsB + 1 WHERE pair = ?`),
+  drawn: db.prepare(`UPDATE friends SET draws = draws + 1 WHERE pair = ?`),
   dropLink: db.prepare(`DELETE FROM friends WHERE pair = ?`),
   addDm: db.prepare(`INSERT INTO dms (id,pair,fromId,text,at) VALUES (?,?,?,?,?)`),
   dmPage: db.prepare(`SELECT * FROM dms WHERE pair = ? ORDER BY at DESC LIMIT 200`),
@@ -239,9 +283,27 @@ function partyOf(uid) {
   return null
 }
 
+/**
+ * Everyone's current party in one pass.
+ *
+ * Asking `partyOf` per friend meant walking every room for every name in every
+ * list, and one person connecting rebuilds the list of everyone who knows them —
+ * so the work went up with friends × friends × rooms. Built once and handed
+ * down instead.
+ */
+function partyIndex() {
+  const where = new Map()
+  for (const r of rooms.values()) {
+    for (const m of r.members.values()) {
+      if (m.approved && m.online) where.set(m.id, r.code)
+    }
+  }
+  return where
+}
+
 const publicUser = (u) => u && { id: u.id, code: u.code, name: u.name, avatar: u.avatar }
 
-function friendsOf(id) {
+function friendsOf(id, where = partyIndex()) {
   const out = []
   for (const l of q.links.all(id, id)) {
     const otherId = l.a === id ? l.b : l.a
@@ -256,25 +318,33 @@ function friendsOf(id) {
       incoming: !l.accepted && l.asked !== id,
       outgoing: !l.accepted && l.asked === id,
       online: sessions.has(otherId),
-      party: partyOf(otherId),
+      party: where.get(otherId) || null,
       seen: u.seen,
       last: last ? { text: last.text, at: last.at, mine: last.fromId === id } : null,
+      // The running score at Stack, turned round to this person's point of view
+      // so neither side has to work out which of them is "a".
+      record: {
+        mine: (l.a === id ? l.winsA : l.winsB) || 0,
+        theirs: (l.a === id ? l.winsB : l.winsA) || 0,
+        draws: l.draws || 0,
+      },
     })
   }
   return out.sort((x, y) => (y.online ? 1 : 0) - (x.online ? 1 : 0) || x.name.localeCompare(y.name))
 }
 
-function pushFriends(id) {
+function pushFriends(id, where) {
   const socks = sessions.get(id)
   if (!socks) return
-  const friends = friendsOf(id)
+  const friends = friendsOf(id, where)
   for (const s of socks) send(s, { type: 'friends', friends })
 }
 
 /** Anything that changes how this person looks to others: presence, party, name. */
 function pokeFriends(id) {
-  pushFriends(id)
-  for (const l of q.links.all(id, id)) pushFriends(l.a === id ? l.b : l.a)
+  const where = partyIndex() // one pass, shared by every list we're about to build
+  pushFriends(id, where)
+  for (const l of q.links.all(id, id)) pushFriends(l.a === id ? l.b : l.a, where)
 }
 
 /** Deliver to every device someone has open. Returns whether anyone was there. */
@@ -301,6 +371,22 @@ function expectGuest(r, userId, byId) {
   ;(r.expected ||= new Set()).add(userId)
 }
 
+/**
+ * A head-to-head round of Stack, started from a private chat. One attempt each,
+ * highest tower wins. Held in memory only — nobody needs yesterday's game back.
+ */
+const matches = new Map()
+const MATCH_TTL_MS = 15 * 60_000
+
+function endMatch(matchId, reason) {
+  const g = matches.get(matchId)
+  if (!g) return
+  clearTimeout(g.timer)
+  matches.delete(matchId)
+  toUser(g.a, { type: 'gameend', matchId, reason })
+  toUser(g.b, { type: 'gameend', matchId, reason })
+}
+
 function endCall(callId, reason) {
   const c = calls.get(callId)
   if (!c) return
@@ -320,7 +406,6 @@ setInterval(() => {
     for (const m of r.members.values()) {
       if (m.online || !m.leftAt || now - m.leftAt < MEMBER_TTL_MS) continue
       if (m.id === r.ownerId && !nextOwner([...r.members.values()], r.ownerId)) continue
-      rmAvatar(m.avatar)
       r.members.delete(m.id)
     }
 
@@ -465,8 +550,15 @@ function isShortLink(url) {
 
 async function expandLink(url) {
   try {
-    // HEAD first: these are redirect stubs, so the body is never wanted.
-    const r = await fetch(url, { method: 'HEAD', redirect: 'follow', headers: { 'User-Agent': UA } })
+    // HEAD, because these are redirect stubs and the body is never wanted — and
+    // on a timer, because somebody pasting a link should not be able to hang the
+    // request behind a host that never answers.
+    const r = await fetch(url, {
+      method: 'HEAD',
+      redirect: 'follow',
+      headers: { 'User-Agent': UA },
+      signal: AbortSignal.timeout(4000),
+    })
     return r.url || url
   } catch {
     return url
@@ -830,6 +922,75 @@ wss.on('connection', (ws) => {
       return endCall(String(m.callId), m.type === 'callCancel' ? 'cancelled' : 'declined')
     }
 
+    /* --- a game between two friends ---------------------------------- */
+
+    if (m.type === 'challenge' && who) {
+      const to = String(m.id || '')
+      if (!areFriends(who.id, to)) return fail('You can only challenge friends')
+      // One at a time between any two people, or scores land in the wrong game.
+      for (const [id, g] of matches) {
+        if ((g.a === who.id && g.b === to) || (g.a === to && g.b === who.id)) endMatch(id, 'cancelled')
+      }
+      const matchId = randomUUID()
+      matches.set(matchId, {
+        a: who.id, b: to, scores: {},
+        timer: setTimeout(() => endMatch(matchId, 'expired'), MATCH_TTL_MS),
+      })
+      if (!toUser(to, { type: 'challenge', matchId, from: publicUser(who) })) {
+        endMatch(matchId, 'offline')
+        return fail('They are offline')
+      }
+      return send(ws, { type: 'challenged', matchId, to })
+    }
+
+    if (m.type === 'challengeAccept' && who) {
+      const matchId = String(m.matchId || '')
+      const g = matches.get(matchId)
+      if (!g || g.b !== who.id) return
+      const a = q.user.get(g.a)
+      const b = q.user.get(g.b)
+      toUser(g.a, { type: 'gamestart', matchId, opponent: publicUser(b) })
+      toUser(g.b, { type: 'gamestart', matchId, opponent: publicUser(a) })
+      return
+    }
+
+    if ((m.type === 'challengeDecline' || m.type === 'challengeCancel') && who) {
+      const g = matches.get(String(m.matchId || ''))
+      if (!g || (g.a !== who.id && g.b !== who.id)) return
+      return endMatch(String(m.matchId), m.type === 'challengeCancel' ? 'cancelled' : 'declined')
+    }
+
+    if (m.type === 'gameScore' && who) {
+      const matchId = String(m.matchId || '')
+      const g = matches.get(matchId)
+      if (!g || (g.a !== who.id && g.b !== who.id)) return
+      // First tower counts. A second run would just be picking your best of many.
+      if (g.scores[who.id] != null) return
+      g.scores[who.id] = Math.max(0, Math.min(99_999, Math.floor(Number(m.score) || 0)))
+
+      const done = g.scores[g.a] != null && g.scores[g.b] != null
+      const news = { type: done ? 'gameresult' : 'gamescore', matchId, scores: g.scores }
+      if (done) {
+        const [sa, sb] = [g.scores[g.a], g.scores[g.b]]
+        news.winner = sa === sb ? null : sa > sb ? g.a : g.b
+        clearTimeout(g.timer)
+        matches.delete(matchId)
+
+        // The running score outlives the match, so it goes in the database.
+        const pair = pairKey(g.a, g.b)
+        const link = q.link.get(pair)
+        if (link) {
+          if (news.winner == null) q.drawn.run(pair)
+          else if (news.winner === link.a) q.winA.run(pair)
+          else q.winB.run(pair)
+        }
+      }
+      toUser(g.a, news)
+      toUser(g.b, news)
+      if (done) { pushFriends(g.a); pushFriends(g.b) }
+      return
+    }
+
     if (m.type === 'create') {
       const cap = Math.min(50, Math.max(2, Number(m.cap) || 6))
       const code = newCode(new Set(rooms.keys()))
@@ -882,7 +1043,6 @@ wss.on('connection', (ws) => {
         say(room, `${t.name} joined`)
       } else {
         send(t.ws, { type: 'declined' })
-        rmAvatar(t.avatar)
         room.members.delete(m.id)
       }
       return pushState(room)
@@ -895,7 +1055,6 @@ wss.on('connection', (ws) => {
       if (t.coHost && !isOwner()) return fail('Only the host can remove a co-host')
       send(t.ws, { type: 'declined' })
       t.ws?.close()
-      rmAvatar(t.avatar)
       room.members.delete(m.id)
       say(room, `${t.name} was removed`)
       return pushState(room)
@@ -932,7 +1091,6 @@ wss.on('connection', (ws) => {
       const gone = me
       room = null
       me = null
-      rmAvatar(gone.avatar)
       r.members.delete(gone.id)
       send(ws, { type: 'left' })
       if (who) pokeFriends(who.id) // they're out of that party now
@@ -1133,6 +1291,10 @@ wss.on('connection', (ws) => {
       if (socks && !socks.size) sessions.delete(who.id)
       q.seenUser.run(Date.now(), who.id)
       for (const [id, c] of calls) if (c.from === who.id || c.to === who.id) endCall(id, 'gone')
+      // Only if they've gone entirely — a second device staying open is fine.
+      if (!sessions.has(who.id)) {
+        for (const [id, g] of matches) if (g.a === who.id || g.b === who.id) endMatch(id, 'gone')
+      }
       pokeFriends(who.id)
     }
 

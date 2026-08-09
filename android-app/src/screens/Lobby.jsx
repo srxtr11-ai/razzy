@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Camera, Clapperboard, LogIn, Minus, Plus, Settings2, Users } from 'lucide-react'
 import { api, identity, pickAvatar, remember } from '../api.js'
 import { Avatar, Button, useLayout } from '../components/ui.jsx'
+import Cropper from '../Cropper.jsx'
 
 export default function Lobby({ party, onFriends, friendCount = 0 }) {
   const me = identity()
@@ -11,6 +12,7 @@ export default function Lobby({ party, onFriends, friendCount = 0 }) {
   const [code, setCode] = useState('')
   const [cap, setCap] = useState(6)
   const [busy, setBusy] = useState(false)
+  const [cropping, setCropping] = useState(null)
   const [showServer, setShowServer] = useState(false)
   const [server, setServer] = useState(api.isDefault ? '' : api.base)
   const file = useRef(null)
@@ -26,11 +28,23 @@ export default function Lobby({ party, onFriends, friendCount = 0 }) {
     return () => clearTimeout(t)
   }, [name, avatar]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const choose = async (e) => {
+  // Choosing only opens the cropper; nothing goes anywhere until it's framed.
+  const choose = (e) => {
     const f = e.target.files?.[0]
-    if (!f) return
+    e.target.value = '' // so the same file can be picked twice
+    if (f) setCropping(f)
+  }
+
+  const saveAvatar = async (dataUrl) => {
     setBusy(true)
-    try { setAvatar(await pickAvatar(f)) } catch { party.setError('Could not upload that picture') }
+    try {
+      const url = await pickAvatar(dataUrl)
+      setAvatar(url)
+      party.setProfile(name.trim() || 'Guest', url)
+      setCropping(null)
+    } catch {
+      party.setError('Could not upload that picture')
+    }
     setBusy(false)
   }
 
@@ -193,6 +207,10 @@ export default function Lobby({ party, onFriends, friendCount = 0 }) {
           )}
         </div>
       </div>
+
+      {cropping && (
+        <Cropper file={cropping} onCancel={() => setCropping(null)} onDone={saveAvatar} />
+      )}
     </div>
   )
 }

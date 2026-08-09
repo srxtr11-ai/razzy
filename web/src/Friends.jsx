@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   ArrowLeft, Check, Copy, KeyRound, LogIn, Phone, PhoneOff, Send,
-  UserPlus, UserX, Users, X,
+  Swords, UserPlus, UserX, Users, X,
 } from 'lucide-react'
 import { Avatar, Button } from './ui.jsx'
 
@@ -22,6 +22,27 @@ const ago = (t) => {
   return `${Math.floor(s / 86400)}d ago`
 }
 
+/** The running score at Stack. Nothing shown until there's something to show. */
+export function Record({ record, name, full }) {
+  if (!record) return null
+  const { mine = 0, theirs = 0, draws = 0 } = record
+  if (!mine && !theirs && !draws) return null
+  const lead = mine === theirs ? 'level' : mine > theirs ? 'you' : 'them'
+  const tint = lead === 'you' ? 'text-grass' : lead === 'them' ? 'text-white/70' : 'text-white/50'
+  return (
+    <span className={`inline-flex items-center gap-1.5 ${tint}`}>
+      <Swords size={11} className="shrink-0" />
+      <span className="font-semibold tabular-nums">{mine}–{theirs}</span>
+      {full && (
+        <span className="text-white/40 font-normal">
+          {lead === 'level' ? 'all square' : lead === 'you' ? "you're ahead" : `${name} is ahead`}
+          {draws > 0 ? `, ${draws} drawn` : ''}
+        </span>
+      )}
+    </span>
+  )
+}
+
 /** A friend's row: who they are, whether they're about, and what they're watching. */
 function Row({ f, onOpen, onAccept, onJoin }) {
   return (
@@ -36,9 +57,16 @@ function Row({ f, onOpen, onAccept, onJoin }) {
 
       <button onClick={onOpen} className="press flex-1 min-w-0 text-left">
         <div className="text-sm font-semibold truncate">{f.name}</div>
-        <div className="text-[11px] text-white/40 truncate">
+        <div className="text-[11px] text-white/40 truncate flex items-center gap-2">
           {f.incoming ? 'Wants to be friends' : f.outgoing ? 'Request sent' : null}
-          {f.accepted && (f.party ? `In party ${f.party}` : f.online ? 'Online' : `Last seen ${ago(f.seen)}`)}
+          {f.accepted && (
+            <>
+              <span className="truncate">
+                {f.party ? `In party ${f.party}` : f.online ? 'Online' : `Last seen ${ago(f.seen)}`}
+              </span>
+              <Record record={f.record} name={f.name} />
+            </>
+          )}
         </div>
       </button>
 
@@ -58,7 +86,7 @@ function Row({ f, onOpen, onAccept, onJoin }) {
 }
 
 /** The private chat with one friend, plus everything you can do to them. */
-function Thread({ party, f, onBack }) {
+function Thread({ party, f, onBack, onClose }) {
   const [text, setText] = useState('')
   const list = useRef(null)
   const msgs = party.threads[f.id] || []
@@ -70,23 +98,37 @@ function Thread({ party, f, onBack }) {
   return (
     <div className="h-full flex flex-col min-h-0">
       <div className="flex items-center gap-2 px-2 py-2 shrink-0">
-        <button onClick={onBack} className="press grid place-items-center w-10 h-10 rounded-xl bg-white/6">
-          <ArrowLeft size={17} />
+        <button onClick={onBack} className="press grid place-items-center w-11 h-11 rounded-xl bg-white/6 shrink-0">
+          <ArrowLeft size={18} />
         </button>
         <Avatar m={f} size={34} dim={!f.online} />
         <div className="min-w-0 flex-1">
           <div className="text-sm font-semibold truncate">{f.name}</div>
-          <div className="text-[11px] text-white/40 truncate">
-            {f.party ? `In party ${f.party}` : f.online ? 'Online' : `Last seen ${ago(f.seen)}`}
+          <div className="text-[11px] text-white/40 truncate flex items-center gap-2">
+            <span className="truncate">
+              {f.party ? `In party ${f.party}` : f.online ? 'Online' : `Last seen ${ago(f.seen)}`}
+            </span>
+            <Record record={f.record} name={f.name} />
           </div>
         </div>
         <button
           onClick={() => party.removeFriend(f.id)}
-          className="press grid place-items-center w-10 h-10 rounded-xl text-white/35 hover:text-red-300 hover:bg-red-500/15"
+          className="press grid place-items-center w-11 h-11 rounded-xl text-white/35 hover:text-red-300 hover:bg-red-500/15 shrink-0"
           title="Remove friend"
         >
-          <UserX size={16} />
+          <UserX size={17} />
         </button>
+        {/* Out of the whole panel, not just back to the list — being one screen
+            deep shouldn't mean two taps to leave. */}
+        {onClose && (
+          <button
+            onClick={onClose}
+            className="press grid place-items-center w-11 h-11 rounded-xl bg-white/6 shrink-0"
+            aria-label="Close friends"
+          >
+            <X size={18} />
+          </button>
+        )}
       </div>
 
       {/* The three things worth doing from here. Calling needs a party to drop
@@ -113,6 +155,18 @@ function Thread({ party, f, onBack }) {
         >
           <Phone size={15} />
           Call
+        </Button>
+      </div>
+
+      {/* Needs no party — it's something to do instead of watching. */}
+      <div className="px-2 pb-2 shrink-0">
+        <Button
+          kind="ghost" className="w-full h-10 bg-white/6" disabled={!f.online}
+          title={f.online ? 'One round each, highest tower wins' : 'They are offline'}
+          onClick={() => party.challengeFriend(f.id)}
+        >
+          <Swords size={15} />
+          Challenge at Stack
         </Button>
       </div>
 
@@ -172,7 +226,7 @@ export default function Friends({ party, onClose }) {
   const requests = party.friends.filter((f) => f.incoming)
   const rest = party.friends.filter((f) => !f.incoming)
 
-  if (open) return <Thread party={party} f={open} onBack={() => setOpenId(null)} />
+  if (open) return <Thread party={party} f={open} onBack={() => setOpenId(null)} onClose={onClose} />
 
   return (
     <div className="h-full flex flex-col min-h-0">
@@ -180,8 +234,12 @@ export default function Friends({ party, onClose }) {
         <Users size={16} className="text-grass" />
         <span className="text-[11px] uppercase tracking-[0.2em] text-white/35 flex-1">Friends</span>
         {onClose && (
-          <button onClick={onClose} className="press grid place-items-center w-9 h-9 rounded-xl bg-white/6">
-            <X size={16} />
+          <button
+            onClick={onClose}
+            className="press grid place-items-center w-11 h-11 rounded-xl bg-white/6 shrink-0"
+            aria-label="Close friends"
+          >
+            <X size={18} />
           </button>
         )}
       </div>
@@ -303,7 +361,7 @@ export function CallOverlay({ party }) {
   const person = ring ? ring.from : party.friends.find((f) => f.id === calling.to)
 
   return (
-    <div className="fixed inset-0 z-[90] grid place-items-center bg-black/80 backdrop-blur-xl px-6">
+    <div className="fixed inset-0 z-[90] grid place-items-center bg-black/[.88] px-6">
       <div className="liquid rounded-[2rem] p-8 w-full max-w-sm text-center space-y-5 card-in">
         <div className="relative mx-auto w-fit">
           <Avatar m={person} size={88} />

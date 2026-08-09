@@ -16,10 +16,39 @@ android {
             ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    /**
+     * A debug-signed app is the reason Android nags on every install: the debug
+     * key is a well-known shared one, the app is marked debuggable, and Play
+     * Protect treats that as something to warn about, every single time.
+     *
+     * A real key of our own fixes the repeated warning and — because the
+     * signature is now stable — lets a new build install over the old one
+     * instead of having to uninstall first.
+     *
+     * Sideloading from outside the Play Store still shows a one-off "unknown
+     * app" prompt the first time. Nothing but publishing removes that.
+     */
+    signingConfigs {
+        release {
+            def props = new Properties()
+            def file = rootProject.file('keystore.properties')
+            if (file.exists()) {
+                file.withInputStream { props.load(it) }
+                storeFile rootProject.file(props['storeFile'])
+                storePassword props['storePassword']
+                keyAlias props['keyAlias']
+                keyPassword props['keyPassword']
+            }
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            if (rootProject.file('keystore.properties').exists()) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 }
